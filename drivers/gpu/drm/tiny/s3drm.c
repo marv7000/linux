@@ -8,18 +8,8 @@
  * linux/drivers/video/fbdev/s3fb.c
  */
 
-#include "linux/compiler_attributes.h"
-#include <linux/aperture.h>
-#include <linux/module.h>
-#include <linux/init.h>
-#include <linux/pci.h>
-#include <linux/fb.h>
-#include <linux/svga.h>
-#include <linux/pm.h>
-#include <linux/i2c.h>
-#include <linux/i2c-algo-bit.h>
-
 #include <drm/drm_module.h>
+#include <drm/drm_client.h>
 #include <drm/drm_aperture.h>
 #include <drm/drm_managed.h>
 #include <drm/drm_mode.h>
@@ -29,9 +19,14 @@
 #include <drm/drm_ioctl.h>
 #include <drm/drm_gem_shmem_helper.h>
 #include <drm/drm_modeset_helper.h>
+#include <drm/drm_atomic_helper.h>
 #include <drm/drm_fb_helper.h>
 
-#include <video/vga.h>
+#include <linux/console.h>
+#include <linux/aperture.h>
+#include <linux/init.h>
+#include <linux/svga.h>
+#include <linux/pm.h>
 
 /* ------------------------------------------------------------------------- */
 /* Defines                                                                   */
@@ -73,7 +68,6 @@ MODULE_PARM_DESC(fasttext, "Enable S3 fast text mode (1=enable, 0=disable, defau
 
 /* ------------------------------------------------------------------------- */
 /* Device                                                                    */
-#define CONFIG_DRM_S3_DDC
 
 enum s3drm_chip {
 	CHIP_UNKNOWN		= 0x00,
@@ -380,6 +374,111 @@ static int s3drm_setup_ddc_bus(struct s3_device *s3dev)
 /* ------------------------------------------------------------------------- */
 /* DRM                                                                       */
 
+/* Set font in S3 fast text mode */
+static void s3drm_settile_fast(struct fb_info *info, struct fb_tilemap *map)
+{
+	const u8 *font = map->data;
+	u8 __iomem *fb = (u8 __iomem *) info->screen_base;
+	int i, c;
+
+	if ((map->width != 8) || (map->height != 16) ||
+	    (map->depth != 1) || (map->length != 256)) {
+		drm_err(info, "unsupported font parameters: width %d, height %d, depth %d, length %d\n",
+		       map->width, map->height, map->depth, map->length);
+		return;
+	}
+
+	fb += 2;
+	for (i = 0; i < map->height; i++) {
+		for (c = 0; c < map->length; c++) {
+			fb_writeb(font[c * map->height + i], fb + c * 4);
+		}
+		fb += 1024;
+	}
+}
+
+static void s3drm_tilecursor(struct fb_info *info, struct fb_tilecursor *cursor)
+{
+	struct s3_device *par = info->par;
+	svga_tilecursor(par->state.vgabase, info, cursor);
+}
+
+static struct fb_tile_ops s3drm_tile_ops = {
+	.fb_settile	= svga_settile,
+	.fb_tilecopy	= svga_tilecopy,
+	.fb_tilefill    = svga_tilefill,
+	.fb_tileblit    = svga_tileblit,
+	.fb_tilecursor  = s3drm_tilecursor,
+	.fb_get_tilemax = svga_get_tilemax,
+};
+
+static struct fb_tile_ops s3drm_fast_tile_ops = {
+	.fb_settile	= s3drm_settile_fast,
+	.fb_tilecopy	= svga_tilecopy,
+	.fb_tilefill    = svga_tilefill,
+	.fb_tileblit    = svga_tileblit,
+	.fb_tilecursor  = s3drm_tilecursor,
+	.fb_get_tilemax = svga_get_tilemax,
+};
+
+/* Set a colour register */
+static int s3drm_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
+			   u_int transp, struct fb_info *fb)
+{
+	switch (fb->var.bits_per_pixel) {
+	case 0:
+	case 4:
+		if (regno >= 16)
+			return -EINVAL;
+
+		if ((fb->var.bits_per_pixel == 4) && (fb->var.nonstd == 0)) {
+			outb(0xF0, VGA_PEL_MSK);
+			outb(regno*16, VGA_PEL_IW);
+		} else {
+			outb(0x0F, VGA_PEL_MSK);
+			outb(regno, VGA_PEL_IW);
+		}
+		outb(red >> 10, VGA_PEL_D);
+		outb(green >> 10, VGA_PEL_D);
+		outb(blue >> 10, VGA_PEL_D);
+		break;
+	case 8:
+		if (regno >= 256)
+			return -EINVAL;
+
+		outb(0xFF, VGA_PEL_MSK);
+		outb(regno, VGA_PEL_IW);
+		outb(red >> 10, VGA_PEL_D);
+		outb(green >> 10, VGA_PEL_D);
+		outb(blue >> 10, VGA_PEL_D);
+		break;
+	case 16:
+		if (regno >= 16)
+			return 0;
+
+		if (fb->var.green.length == 5)
+			((u32*)fb->pseudo_palette)[regno] = ((red & 0xF800) >> 1) |
+				((green & 0xF800) >> 6) | ((blue & 0xF800) >> 11);
+		else if (fb->var.green.length == 6)
+			((u32*)fb->pseudo_palette)[regno] = (red & 0xF800) |
+				((green & 0xFC00) >> 5) | ((blue & 0xF800) >> 11);
+		else return -EINVAL;
+		break;
+	case 24:
+	case 32:
+		if (regno >= 16)
+			return 0;
+
+		((u32*)fb->pseudo_palette)[regno] = ((red & 0xFF00) << 8) |
+			(green & 0xFF00) | ((blue & 0xFF00) >> 8);
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int __maybe_unused s3drm_blank(int blank_mode, struct s3_device *s3dev)
 {
 	struct drm_device *info = &s3dev->dev;
@@ -415,6 +514,36 @@ static int __maybe_unused s3drm_blank(int blank_mode, struct s3_device *s3dev)
 	return 0;
 }
 
+
+/* Pan the display */
+static int s3fb_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
+{
+	struct s3_device *par = info->par;
+	unsigned int offset;
+
+	/* Calculate the offset */
+	if (info->var.bits_per_pixel == 0) {
+		offset = (var->yoffset / 16) * (info->var.xres_virtual / 2)
+		       + (var->xoffset / 2);
+		offset = offset >> 2;
+	} else {
+		offset = (var->yoffset * info->fix.line_length) +
+			 (var->xoffset * info->var.bits_per_pixel / 8);
+		offset = offset >> 2;
+	}
+
+	/* Set the offset */
+	svga_wcrt_multi(par->state.vgabase, s3_start_address_regs, offset);
+
+	return 0;
+}
+
+// TODO
+static int s3drm_probe(struct drm_fb_helper *fb_helper, struct drm_fb_helper_surface_size *surf)
+{
+	return 0;
+}
+
 static const struct drm_driver s3drm_driver = {
 	.name			= DRIVER_NAME,
 	.desc			= DRIVER_DESC,
@@ -423,6 +552,15 @@ static const struct drm_driver s3drm_driver = {
 	.minor			= DRIVER_MINOR,
 	.patchlevel		= DRIVER_PATCHLEVEL,
 	.driver_features	= DRIVER_ATOMIC | DRIVER_GEM | DRIVER_MODESET,
+	.lastclose		= drm_fb_helper_lastclose,
+};
+
+static const struct drm_fb_helper_funcs s3drm_helper_funcs = {
+	.fb_probe		= s3drm_probe,
+};
+
+static const struct drm_fb_helper s3drm_helper = {
+	.funcs			= &s3drm_helper_funcs,
 };
 
 /* ------------------------------------------------------------------------- */
@@ -585,7 +723,7 @@ static int s3_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	info->pseudo_palette = (void*) (par->pseudo_palette);
 	info->var.bits_per_pixel = 8;
 
-#ifdef CONFIG_FB_S3_DDC
+#ifdef CONFIG_DRM_S3_DDC
 	/* Enable MMIO if needed */
 	if (s3drm_ddc_needs_mmio(par->chip)) {
 		par->mmio = ioremap(info->fix.smem_start + MMIO_OFFSET, MMIO_SIZE);
@@ -704,39 +842,24 @@ err_enable_device:
 	return rc;
 }
 
-static void s3_pci_remove(struct pci_dev *dev)
+static void s3_pci_remove(struct pci_dev *pdev)
 {
-	struct fb_info *info = pci_get_drvdata(dev);
+	struct drm_device *dev = pci_get_drvdata(pdev);
 	struct s3_device __maybe_unused *par;
 
-	if (info) {
-		par = info->par;
-		arch_phys_wc_del(par->wc_cookie);
-		unregister_framebuffer(info);
-		fb_dealloc_cmap(&info->cmap);
-
-#ifdef CONFIG_FB_S3_DDC
-		if (par->ddc_registered)
-			i2c_del_adapter(&par->ddc_adapter);
-		if (par->mmio)
-			iounmap(par->mmio);
-#endif
-
-		pci_iounmap(dev, info->screen_base);
-		pci_release_regions(dev);
-/*		pci_disable_device(dev); */
-
-		framebuffer_release(info);
-	}
+	drm_dev_unplug(dev);
+	drm_atomic_helper_shutdown(dev);
 }
 
 static const struct pci_device_id s3_devices[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x8810), .driver_data = CHIP_XXX_TRIO },
 	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x8811), .driver_data = CHIP_XXX_TRIO },
-/*	TODO: Unsupported because untested.
-	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x8812), .driver_data = CHIP_M65_AURORA64VP },
 	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x8814), .driver_data = CHIP_767_TRIO64UVP },
 	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x8901), .driver_data = CHIP_XXX_TRIO64V2_DXGX },
+	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x8A13), .driver_data = CHIP_36X_TRIO3D_1X_2X },
+	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x8904), .driver_data = CHIP_365_TRIO3D },
+/*	TODO: Unsupported because untested.
+	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x8812), .driver_data = CHIP_M65_AURORA64VP },
 	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x8902), .driver_data = CHIP_551_PLATO_PX },
 	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x5631), .driver_data = CHIP_325_VIRGE },
 	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x883D), .driver_data = CHIP_988_VIRGE_VX },
@@ -744,8 +867,6 @@ static const struct pci_device_id s3_devices[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x8A10), .driver_data = CHIP_357_VIRGE_GX2 },
 	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x8A11), .driver_data = CHIP_359_VIRGE_GX2P },
 	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x8A12), .driver_data = CHIP_359_VIRGE_GX2P },
-	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x8A13), .driver_data = CHIP_36X_TRIO3D_1X_2X },
-	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x8904), .driver_data = CHIP_365_TRIO3D },
 	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x8C01), .driver_data = CHIP_260_VIRGE_MX },
 */
 	{ /* End of list */ }
@@ -765,9 +886,10 @@ static struct pci_driver s3drm_pci_driver = {
 /* ------------------------------------------------------------------------- */
 /* Module                                                                    */
 
+// TODO
 #ifndef MODULE
 /* Parse user specified options */
-static int  __init s3drm_setup(char *options)
+static int __init s3drm_setup(char *options)
 {
 	char *opt;
 
@@ -790,6 +912,7 @@ static int  __init s3drm_setup(char *options)
 }
 #endif /* MODULE */
 
+/* Module initialization */
 static int __init s3drm_init(void)
 {
 	if (s3drm_modeset == -1)
@@ -807,17 +930,9 @@ static int __init s3drm_init(void)
 	return pci_register_driver(&s3drm_pci_driver);
 }
 
-static void __exit s3drm_cleanup(void)
-{
-	pr_debug(DRIVER_NAME ": Cleaning up\n");
-	pci_unregister_driver(&s3drm_pci_driver);
-}
-
 /* ------------------------------------------------------------------------- */
 
 drm_module_pci_driver_if_modeset(s3drm_pci_driver, s3drm_modeset);
-module_init(s3drm_init);
-module_exit(s3drm_cleanup);
 
 MODULE_DEVICE_TABLE(pci, s3_devices);
 MODULE_AUTHOR(DRIVER_AUTHOR);
