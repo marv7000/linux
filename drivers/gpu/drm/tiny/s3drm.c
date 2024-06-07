@@ -21,6 +21,7 @@
 #include <drm/drm_modeset_helper.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_fb_helper.h>
+#include <drm/drm_fbdev_generic.h>
 
 #include <linux/console.h>
 #include <linux/aperture.h>
@@ -42,29 +43,6 @@
 
 #define MMIO_OFFSET		0x1000000
 #define MMIO_SIZE		0x10000
-
-/* ------------------------------------------------------------------------- */
-/* Module parameters                                                         */
-
-static int s3drm_modeset = -1;
-static char *mode_option;
-static int mtrr = 1;
-static int fasttext = 1;
-
-module_param_named(modeset, s3drm_modeset, int, 0444);
-MODULE_PARM_DESC(modeset, "Enable/disable kernel modesetting");
-
-module_param(mode_option, charp, 0444);
-MODULE_PARM_DESC(mode_option, "Default video mode ('640x480-8@60', etc)");
-
-module_param_named(mode, mode_option, charp, 0444);
-MODULE_PARM_DESC(mode, "Default video mode ('640x480-8@60', etc) (deprecated)");
-
-module_param(mtrr, int, 0444);
-MODULE_PARM_DESC(mtrr, "Enable write-combining with MTRR (1=enable, 0=disable, default=1)");
-
-module_param(fasttext, int, 0644);
-MODULE_PARM_DESC(fasttext, "Enable S3 fast text mode (1=enable, 0=disable, default=1)");
 
 /* ------------------------------------------------------------------------- */
 /* Device                                                                    */
@@ -583,12 +561,12 @@ static int s3_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 		return -ENODEV;
 	}
 
-	rc = aperture_remove_conflicting_pci_devices(dev, DRIVER_NAME);
+	rc = drm_aperture_remove_conflicting_pci_framebuffers(dev, &s3drm_driver);
 	if (rc)
 		return rc;
 
 	/* Allocate and fill driver data structure */
-	info = framebuffer_alloc(sizeof(struct s3_device), &(dev->dev));
+	info = drm_dev_register(&(dev->), 0);
 	if (!info)
 		return -ENOMEM;
 
@@ -760,53 +738,17 @@ static int s3_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 			}
 		}
 #endif
-	if (!mode_option && !found)
-		mode_option = "640x480-8@60";
+	//TODO Pipeline setup
+	// register device
+	drm_fbdev_generic_setup(dev, 32);
+	// reset
 
-	/* Prepare startup mode */
-	if (mode_option) {
-		rc = fb_find_mode(&info->var, info, mode_option,
-				   info->monspecs.modedb, info->monspecs.modedb_len,
-				   NULL, info->var.bits_per_pixel);
-		if (!rc || rc == 4) {
-			rc = -EINVAL;
-			dev_err(info->device, "mode %s not found\n", mode_option);
-			fb_destroy_modedb(info->monspecs.modedb);
-			info->monspecs.modedb = NULL;
-			goto err_find_mode;
-		}
-	}
-
-	fb_destroy_modedb(info->monspecs.modedb);
-	info->monspecs.modedb = NULL;
-
-	/* maximize virtual vertical size for fast scrolling */
-	info->var.yres_virtual = info->fix.smem_len * 8 /
-			(info->var.bits_per_pixel * info->var.xres_virtual);
-	if (info->var.yres_virtual < info->var.yres) {
-		dev_err(info->device, "virtual vertical size smaller than real\n");
-		rc = -EINVAL;
-		goto err_find_mode;
-	}
-
-	rc = fb_alloc_cmap(&info->cmap, 256, 0);
-	if (rc < 0) {
-		dev_err(info->device, "cannot allocate colormap\n");
-		goto err_alloc_cmap;
-	}
-
-	rc = register_framebuffer(info);
-	if (rc < 0) {
-		dev_err(info->device, "cannot register framebuffer\n");
-		goto err_reg_fb;
-	}
-
-	fb_info(info, "%s on %s, %d MB RAM, %d MHz MCLK\n",
+	drm_info(info, "%s on %s, %d MB RAM, %d MHz MCLK\n",
 		info->fix.id, pci_name(dev),
 		info->fix.smem_len >> 20, (par->mclk_freq + 500) / 1000);
 
 	if (par->chip == CHIP_UNKNOWN)
-		fb_info(info, "unknown chip, CR2D=%x, CR2E=%x, CRT2F=%x, CRT30=%x\n",
+		drm_info(info, "unknown chip, CR2D=%x, CR2E=%x, CRT2F=%x, CRT30=%x\n",
 			vga_rcrt(par->state.vgabase, 0x2d),
 			vga_rcrt(par->state.vgabase, 0x2e),
 			vga_rcrt(par->state.vgabase, 0x2f),
@@ -814,10 +756,6 @@ static int s3_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 
 	/* Record a reference to the driver data */
 	pci_set_drvdata(dev, info);
-
-	if (mtrr)
-		par->wc_cookie = arch_phys_wc_add(info->fix.smem_start,
-						  info->fix.smem_len);
 
 	return 0;
 
@@ -847,7 +785,7 @@ static void s3_pci_remove(struct pci_dev *pdev)
 	struct drm_device *dev = pci_get_drvdata(pdev);
 	struct s3_device __maybe_unused *par;
 
-	drm_dev_unplug(dev);
+	drm_dev_unregister(dev);
 	drm_atomic_helper_shutdown(dev);
 }
 
@@ -884,55 +822,8 @@ static struct pci_driver s3drm_pci_driver = {
 };
 
 /* ------------------------------------------------------------------------- */
-/* Module                                                                    */
 
-// TODO
-#ifndef MODULE
-/* Parse user specified options */
-static int __init s3drm_setup(char *options)
-{
-	char *opt;
-
-	if (!options || !*options)
-		return 0;
-
-	while ((opt = strsep(&options, ",")) != NULL) {
-
-		if (!*opt)
-			continue;
-		else if (!strncmp(opt, "mtrr:", 5))
-			mtrr = simple_strtoul(opt + 5, NULL, 0);
-		else if (!strncmp(opt, "fasttext:", 9))
-			fasttext = simple_strtoul(opt + 9, NULL, 0);
-		else
-			mode_option = opt;
-	}
-
-	return 0;
-}
-#endif /* MODULE */
-
-/* Module initialization */
-static int __init s3drm_init(void)
-{
-	if (s3drm_modeset == -1)
-		return -ENODEV;
-
-	pr_debug(DRIVER_NAME ": Initializing\n");
-
-#ifndef MODULE
-	char *option = NULL;
-	if (fb_get_options(DRIVER_NAME, &option))
-		return -ENODEV;
-	s3drm_setup(option);
-#endif
-
-	return pci_register_driver(&s3drm_pci_driver);
-}
-
-/* ------------------------------------------------------------------------- */
-
-drm_module_pci_driver_if_modeset(s3drm_pci_driver, s3drm_modeset);
+drm_module_pci_driver(s3drm_pci_driver);
 
 MODULE_DEVICE_TABLE(pci, s3_devices);
 MODULE_AUTHOR(DRIVER_AUTHOR);
