@@ -355,6 +355,7 @@ static int s3drm_setup_ddc_bus(struct s3_device *s3dev)
 /* DRM                                                                       */
 
 /* Set font in S3 fast text mode */
+/*
 static void s3drm_settile_fast(struct fb_info *info, struct fb_tilemap *map)
 {
 	const u8 *font = map->data;
@@ -376,13 +377,17 @@ static void s3drm_settile_fast(struct fb_info *info, struct fb_tilemap *map)
 		fb += 1024;
 	}
 }
+*/
 
+/*
 static void s3drm_tilecursor(struct fb_info *info, struct fb_tilecursor *cursor)
 {
 	struct s3_device *par = info->par;
 	svga_tilecursor(par->state.vgabase, info, cursor);
 }
+*/
 
+/*
 static struct fb_tile_ops s3drm_tile_ops = {
 	.fb_settile	= svga_settile,
 	.fb_tilecopy	= svga_tilecopy,
@@ -400,8 +405,10 @@ static struct fb_tile_ops s3drm_fast_tile_ops = {
 	.fb_tilecursor  = s3drm_tilecursor,
 	.fb_get_tilemax = svga_get_tilemax,
 };
+*/
 
 /* Set a colour register */
+/*
 static int s3drm_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 			   u_int transp, struct fb_info *fb)
 {
@@ -458,6 +465,7 @@ static int s3drm_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 
 	return 0;
 }
+*/
 
 static int __maybe_unused s3drm_blank(int blank_mode, struct s3_device *s3dev)
 {
@@ -495,12 +503,12 @@ static int __maybe_unused s3drm_blank(int blank_mode, struct s3_device *s3dev)
 }
 
 /* Pan the display */
+/*
 static int s3fb_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
 {
 	struct s3_device *par = info->par;
 	unsigned int offset;
 
-	/* Calculate the offset */
 	if (info->var.bits_per_pixel == 0) {
 		offset = (var->yoffset / 16) * (info->var.xres_virtual / 2)
 		       + (var->xoffset / 2);
@@ -511,11 +519,11 @@ static int s3fb_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
 		offset = offset >> 2;
 	}
 
-	/* Set the offset */
 	svga_wcrt_multi(par->state.vgabase, s3_start_address_regs, offset);
 
 	return 0;
 }
+*/
 
 static int s3drm_fb_helper_probe(struct drm_fb_helper *fb_helper, struct drm_fb_helper_surface_size *surf)
 {
