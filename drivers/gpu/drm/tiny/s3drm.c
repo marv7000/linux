@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * linux/drivers/gpu/drm/tiny/s3drm.c -- DRM driver for S3 Trio
+ * DRM driver for S3 Trio
  *
  * Copyright 2024 Marvin Friedrich <contact@marvinf.com>
  *
@@ -23,6 +23,8 @@
 #include <drm/drm_fb_helper.h>
 #include <drm/drm_fbdev_generic.h>
 
+#include <linux/pci.h>
+#include <linux/i2c-algo-bit.h>
 #include <linux/console.h>
 #include <linux/aperture.h>
 #include <linux/init.h>
@@ -36,7 +38,7 @@
 #define DRIVER_NAME		"s3drm"
 #define DRIVER_DESC		"DRM driver for S3 Trio"
 #define DRIVER_LICENSE		"GPL"
-#define DRIVER_DATE		"20240502"
+#define DRIVER_DATE		"20240610"
 #define DRIVER_MAJOR		0
 #define DRIVER_MINOR		0
 #define DRIVER_PATCHLEVEL	1
@@ -152,7 +154,7 @@ struct s3_device {
 	struct mutex open_lock;
 	unsigned int ref_count;
 	u32 pseudo_palette[16];
-#ifdef CONFIG_DRM_S3_DDC
+#ifdef CONFIG_TINYDRM_S3_DDC
 	u8 __iomem *mmio;
 	bool ddc_registered;
 	struct i2c_adapter ddc_adapter;
@@ -160,7 +162,7 @@ struct s3_device {
 #endif
 
 	struct drm_device dev;
-	struct fb_info *info;
+	struct drm_fb_helper helper;
 };
 
 /* ------------------------------------------------------------------------- */
@@ -241,7 +243,7 @@ static int s3_identification(struct s3_device *dev)
 /* ------------------------------------------------------------------------- */
 /* DDC                                                                       */
 
-#ifdef CONFIG_DRM_S3_DDC
+#ifdef CONFIG_TINYDRM_S3_DDC
 
 #define DDC_REG		0xaa		/* Trio 3D/1X/2X */
 #define DDC_MMIO_REG	0xff20		/* all other chips */
@@ -316,11 +318,11 @@ static int s3drm_ddc_getsda(void *data)
 
 static int s3drm_setup_ddc_bus(struct s3_device *s3dev)
 {
-	strscpy(s3dev->ddc_adapter.name, s3dev->info->fix.id,
+	strscpy(s3dev->ddc_adapter.name, s3dev->helper.info->fix.id,
 		sizeof(s3dev->ddc_adapter.name));
 	s3dev->ddc_adapter.owner		= THIS_MODULE;
 	s3dev->ddc_adapter.algo_data	= &s3dev->ddc_algo;
-	s3dev->ddc_adapter.dev.parent	= s3dev->info->device;
+	s3dev->ddc_adapter.dev.parent	= s3dev->helper.info->device;
 	s3dev->ddc_algo.setsda		= s3drm_ddc_setsda;
 	s3dev->ddc_algo.setscl		= s3drm_ddc_setscl;
 	s3dev->ddc_algo.getsda		= s3drm_ddc_getsda;
@@ -492,7 +494,6 @@ static int __maybe_unused s3drm_blank(int blank_mode, struct s3_device *s3dev)
 	return 0;
 }
 
-
 /* Pan the display */
 static int s3fb_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
 {
@@ -516,13 +517,23 @@ static int s3fb_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
 	return 0;
 }
 
-// TODO
-static int s3drm_probe(struct drm_fb_helper *fb_helper, struct drm_fb_helper_surface_size *surf)
+static int s3drm_fb_helper_probe(struct drm_fb_helper *fb_helper, struct drm_fb_helper_surface_size *surf)
 {
+	struct s3_device *s3;
+
+	s3 = s3_device_of_dev(fb_helper->dev);
+	s3->dev.fb_helper->info = drm_fb_helper_alloc_info(fb_helper);
 	return 0;
 }
 
+static const struct drm_fb_helper_funcs s3drm_fb_helper_funcs = {
+	.fb_probe = s3drm_fb_helper_probe,
+};
+
+DEFINE_DRM_GEM_FOPS(s3drm_fops);
+
 static const struct drm_driver s3drm_driver = {
+	DRM_GEM_SHMEM_DRIVER_OPS,
 	.name			= DRIVER_NAME,
 	.desc			= DRIVER_DESC,
 	.date			= DRIVER_DATE,
@@ -531,75 +542,73 @@ static const struct drm_driver s3drm_driver = {
 	.patchlevel		= DRIVER_PATCHLEVEL,
 	.driver_features	= DRIVER_ATOMIC | DRIVER_GEM | DRIVER_MODESET,
 	.lastclose		= drm_fb_helper_lastclose,
-};
-
-static const struct drm_fb_helper_funcs s3drm_helper_funcs = {
-	.fb_probe		= s3drm_probe,
-};
-
-static const struct drm_fb_helper s3drm_helper = {
-	.funcs			= &s3drm_helper_funcs,
+	.fops			= &s3drm_fops,
 };
 
 /* ------------------------------------------------------------------------- */
 /* PCI                                                                       */
 
 // TODO
-static int s3_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
+static int s3_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	struct pci_bus_region bus_reg;
 	struct resource vga_res;
+	struct s3_device *s3;
 	struct fb_info *info;
-	struct s3_device *par;
-	int rc;
+	int ret;
 	u8 regval, cr38, cr39;
-	bool found = false;
+
+	ret = drm_aperture_remove_conflicting_pci_framebuffers(pdev, &s3drm_driver);
+	if (ret)
+		return ret;
+
+	/* Allocate and fill driver data structure */
+	s3 = devm_drm_dev_alloc(&pdev->dev, &s3drm_driver, struct s3_device, dev);
+	if (!s3)
+		return -ENOMEM;
+
+	/* Call fb_helper functions to allocate fb_info */
+	drm_fb_helper_prepare(&s3->dev, &s3->helper, 32, &s3drm_fb_helper_funcs);
+	ret = drm_fb_helper_init(&s3->dev, &s3->helper);
+	if (ret) {
+		dev_err(&(pdev->dev), "failed to initialize fb helper\n");
+		return ret;
+	}
+
+	/* Use the fb_info struct from the device */
+	info = s3->dev.fb_helper->info;
 
 	/* Ignore secondary VGA device because there is no VGA arbitration */
-	if (! svga_primary_device(dev)) {
-		dev_info(&(dev->dev), "ignoring secondary device\n");
+	if (!svga_primary_device(pdev)) {
+		dev_info(&(pdev->dev), "ignoring secondary device\n");
 		return -ENODEV;
 	}
 
-	rc = drm_aperture_remove_conflicting_pci_framebuffers(dev, &s3drm_driver);
-	if (rc)
-		return rc;
+	/* Prepare PCI device */
+	ret = pcim_enable_device(pdev);
+	if (ret < 0) {
+		dev_err(info->device, "cannot enable PCI device\n");
+		return ret;
+	}
 
-	/* Allocate and fill driver data structure */
-	info = drm_dev_register(&(dev->), 0);
-	if (!info)
-		return -ENOMEM;
+	ret = pci_request_regions(pdev, DRIVER_NAME);
+	if (ret < 0) {
+		dev_err(info->device, "cannot reserve framebuffer region\n");
+		return ret;
+	}
 
-	par = info->par;
-	mutex_init(&par->open_lock);
+	mutex_init(&s3->open_lock);
 
 	info->flags = FBINFO_PARTIAL_PAN_OK | FBINFO_HWACCEL_YPAN;
-	// TODO
-	//info->fbops = &s3fb_ops;
-
-	/* Prepare PCI device */
-	rc = pci_enable_device(dev);
-	if (rc < 0) {
-		dev_err(info->device, "cannot enable PCI device\n");
-		goto err_enable_device;
-	}
-
-	rc = pci_request_regions(dev, DRIVER_NAME);
-	if (rc < 0) {
-		dev_err(info->device, "cannot reserve framebuffer region\n");
-		goto err_request_regions;
-	}
-
-
-	info->fix.smem_start = pci_resource_start(dev, 0);
-	info->fix.smem_len = pci_resource_len(dev, 0);
+	info->fix.smem_start = pci_resource_start(pdev, 0);
+	info->fix.smem_len = pci_resource_len(pdev, 0);
 
 	/* Map physical IO memory address into kernel space */
-	info->screen_base = pci_iomap_wc(dev, 0, 0);
-	if (! info->screen_base) {
-		rc = -ENOMEM;
+	info->screen_base = pci_iomap_wc(pdev, 0, 0);
+	if (!info->screen_base) {
+		ret = -ENOMEM;
 		dev_err(info->device, "iomap for framebuffer failed\n");
-		goto err_iomap;
+		return ret;
 	}
 
 	bus_reg.start = 0;
@@ -607,30 +616,30 @@ static int s3_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 
 	vga_res.flags = IORESOURCE_IO;
 
-	pcibios_bus_to_resource(dev->bus, &vga_res, &bus_reg);
+	pcibios_bus_to_resource(pdev->bus, &vga_res, &bus_reg);
 
-	par->state.vgabase = (void __iomem *) (unsigned long) vga_res.start;
+	s3->state.vgabase = (void __iomem *) (unsigned long) vga_res.start;
 
 	/* Unlock regs */
-	cr38 = vga_rcrt(par->state.vgabase, 0x38);
-	cr39 = vga_rcrt(par->state.vgabase, 0x39);
-	vga_wseq(par->state.vgabase, 0x08, 0x06);
-	vga_wcrt(par->state.vgabase, 0x38, 0x48);
-	vga_wcrt(par->state.vgabase, 0x39, 0xA5);
+	cr38 = vga_rcrt(s3->state.vgabase, 0x38);
+	cr39 = vga_rcrt(s3->state.vgabase, 0x39);
+	vga_wseq(s3->state.vgabase, 0x08, 0x06);
+	vga_wcrt(s3->state.vgabase, 0x38, 0x48);
+	vga_wcrt(s3->state.vgabase, 0x39, 0xA5);
 
 	/* Identify chip type */
-	par->chip = id->driver_data & CHIP_MASK;
-	par->rev = vga_rcrt(par->state.vgabase, 0x2f);
-	if (par->chip & CHIP_UNDECIDED_FLAG)
-		par->chip = s3_identification(par);
+	s3->chip = id->driver_data & CHIP_MASK;
+	s3->rev = vga_rcrt(s3->state.vgabase, 0x2f);
+	if (s3->chip & CHIP_UNDECIDED_FLAG)
+		s3->chip = s3_identification(s3);
 
-	/* Find how many physical memory there is on card */
+	/* Find how much physical memory there is on card */
 	/* 0x36 register is accessible even if other registers are locked */
-	regval = vga_rcrt(par->state.vgabase, 0x36);
-	if (par->chip == CHIP_360_TRIO3D_1X ||
-	    par->chip == CHIP_362_TRIO3D_2X ||
-	    par->chip == CHIP_368_TRIO3D_2X ||
-	    par->chip == CHIP_365_TRIO3D) {
+	regval = vga_rcrt(s3->state.vgabase, 0x36);
+	if (s3->chip == CHIP_360_TRIO3D_1X ||
+	    s3->chip == CHIP_362_TRIO3D_2X ||
+	    s3->chip == CHIP_368_TRIO3D_2X ||
+	    s3->chip == CHIP_365_TRIO3D) {
 		switch ((regval & 0xE0) >> 5) {
 		case 0: /* 8MB -- only 4MB usable for display */
 		case 1: /* 4MB with 32-bit bus */
@@ -642,9 +651,9 @@ static int s3_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 			info->screen_size = 2 << 20;
 			break;
 		}
-	} else if (par->chip == CHIP_357_VIRGE_GX2 ||
-		   par->chip == CHIP_359_VIRGE_GX2P ||
-		   par->chip == CHIP_260_VIRGE_MX) {
+	} else if (s3->chip == CHIP_357_VIRGE_GX2 ||
+		   s3->chip == CHIP_359_VIRGE_GX2P ||
+		   s3->chip == CHIP_260_VIRGE_MX) {
 		switch ((regval & 0xC0) >> 6) {
 		case 1: /* 4MB */
 			info->screen_size = 4 << 20;
@@ -653,7 +662,7 @@ static int s3_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 			info->screen_size = 2 << 20;
 			break;
 		}
-	} else if (par->chip == CHIP_988_VIRGE_VX) {
+	} else if (s3->chip == CHIP_988_VIRGE_VX) {
 		switch ((regval & 0x60) >> 5) {
 		case 0: /* 2MB */
 			info->screen_size = 2 << 20;
@@ -669,7 +678,7 @@ static int s3_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 			break;
 		}
 		/* off-screen memory */
-		regval = vga_rcrt(par->state.vgabase, 0x37);
+		regval = vga_rcrt(s3->state.vgabase, 0x37);
 		switch ((regval & 0x60) >> 5) {
 		case 1: /* 4MB */
 			info->screen_size -= 4 << 20;
@@ -680,41 +689,42 @@ static int s3_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 		}
 	} else
 		info->screen_size = s3_memsizes[regval >> 5] << 10;
+
 	info->fix.smem_len = info->screen_size;
 
 	/* Find MCLK frequency */
-	regval = vga_rseq(par->state.vgabase, 0x10);
-	par->mclk_freq = ((vga_rseq(par->state.vgabase, 0x11) + 2) * 14318) / ((regval & 0x1F)  + 2);
-	par->mclk_freq = par->mclk_freq >> (regval >> 5);
+	regval = vga_rseq(s3->state.vgabase, 0x10);
+	s3->mclk_freq = ((vga_rseq(s3->state.vgabase, 0x11) + 2) * 14318) / ((regval & 0x1F)  + 2);
+	s3->mclk_freq = s3->mclk_freq >> (regval >> 5);
 
 	/* Restore locks */
-	vga_wcrt(par->state.vgabase, 0x38, cr38);
-	vga_wcrt(par->state.vgabase, 0x39, cr39);
+	vga_wcrt(s3->state.vgabase, 0x38, cr38);
+	vga_wcrt(s3->state.vgabase, 0x39, cr39);
 
-	strcpy(info->fix.id, s3_names [par->chip]);
+	strscpy(info->fix.id, s3_names[s3->chip]);
 	info->fix.mmio_start = 0;
 	info->fix.mmio_len = 0;
 	info->fix.type = FB_TYPE_PACKED_PIXELS;
 	info->fix.visual = FB_VISUAL_PSEUDOCOLOR;
 	info->fix.ypanstep = 0;
 	info->fix.accel = FB_ACCEL_NONE;
-	info->pseudo_palette = (void*) (par->pseudo_palette);
+	info->pseudo_palette = (void*)(s3->pseudo_palette);
 	info->var.bits_per_pixel = 8;
 
-#ifdef CONFIG_DRM_S3_DDC
+#ifdef CONFIG_TINYDRM_S3_DDC
 	/* Enable MMIO if needed */
-	if (s3drm_ddc_needs_mmio(par->chip)) {
-		par->mmio = ioremap(info->fix.smem_start + MMIO_OFFSET, MMIO_SIZE);
-		if (par->mmio)
-			svga_wcrt_mask(par->state.vgabase, 0x53, 0x08, 0x08);	/* enable MMIO */
+	if (s3drm_ddc_needs_mmio(s3->chip)) {
+		s3->mmio = ioremap(info->fix.smem_start + MMIO_OFFSET, MMIO_SIZE);
+		if (s3->mmio)
+			svga_wcrt_mask(s3->state.vgabase, 0x53, 0x08, 0x08);	/* enable MMIO */
 		else
 			dev_err(info->device, "unable to map MMIO at 0x%lx, disabling DDC",
 				info->fix.smem_start + MMIO_OFFSET);
 	}
-	if (!s3drm_ddc_needs_mmio(par->chip) || par->mmio)
-		if (s3drm_setup_ddc_bus(par) == 0) {
-			u8 *edid = fb_ddc_read(&par->ddc_adapter);
-			par->ddc_registered = true;
+	if (!s3drm_ddc_needs_mmio(s3->chip) || s3->mmio)
+		if (s3drm_setup_ddc_bus(s3) == 0) {
+			u8 *edid = fb_ddc_read(&s3->ddc_adapter);
+			s3->ddc_registered = true;
 			if (edid) {
 				fb_edid_to_monspecs(edid, &info->monspecs);
 				kfree(edid);
@@ -729,64 +739,44 @@ static int s3_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 					m = fb_find_best_display(&info->monspecs, &info->modelist);
 					if (m) {
 						fb_videomode_to_var(&info->var, m);
-						/* fill all other info->var's fields */
-						// TODO
-						//if (s3drm_check_var(&info->var, info) == 0)
-						//	found = true;
 					}
 				}
 			}
 		}
 #endif
-	//TODO Pipeline setup
-	// register device
-	drm_fbdev_generic_setup(dev, 32);
-	// reset
+
+	drm_fbdev_generic_setup(&s3->dev, 32);
 
 	drm_info(info, "%s on %s, %d MB RAM, %d MHz MCLK\n",
-		info->fix.id, pci_name(dev),
-		info->fix.smem_len >> 20, (par->mclk_freq + 500) / 1000);
+		info->fix.id, pci_name(pdev),
+		info->fix.smem_len >> 20, (s3->mclk_freq + 500) / 1000);
 
-	if (par->chip == CHIP_UNKNOWN)
+	if (s3->chip == CHIP_UNKNOWN)
 		drm_info(info, "unknown chip, CR2D=%x, CR2E=%x, CRT2F=%x, CRT30=%x\n",
-			vga_rcrt(par->state.vgabase, 0x2d),
-			vga_rcrt(par->state.vgabase, 0x2e),
-			vga_rcrt(par->state.vgabase, 0x2f),
-			vga_rcrt(par->state.vgabase, 0x30));
+			vga_rcrt(s3->state.vgabase, 0x2d),
+			vga_rcrt(s3->state.vgabase, 0x2e),
+			vga_rcrt(s3->state.vgabase, 0x2f),
+			vga_rcrt(s3->state.vgabase, 0x30));
 
 	/* Record a reference to the driver data */
-	pci_set_drvdata(dev, info);
+	pci_set_drvdata(pdev, s3);
 
 	return 0;
-
-	/* Error handling */
-err_reg_fb:
-	fb_dealloc_cmap(&info->cmap);
-err_alloc_cmap:
-err_find_mode:
-#ifdef CONFIG_FB_S3_DDC
-	if (par->ddc_registered)
-		i2c_del_adapter(&par->ddc_adapter);
-	if (par->mmio)
-		iounmap(par->mmio);
-#endif
-	pci_iounmap(dev, info->screen_base);
-err_iomap:
-	pci_release_regions(dev);
-err_request_regions:
-/*	pci_disable_device(dev); */
-err_enable_device:
-	framebuffer_release(info);
-	return rc;
+	// TODO: Error handling.
 }
 
 static void s3_pci_remove(struct pci_dev *pdev)
 {
-	struct drm_device *dev = pci_get_drvdata(pdev);
-	struct s3_device __maybe_unused *par;
+	struct s3_device *s3 = pci_get_drvdata(pdev);
 
-	drm_dev_unregister(dev);
-	drm_atomic_helper_shutdown(dev);
+	drm_dev_unregister(&s3->dev);
+	drm_atomic_helper_shutdown(&s3->dev);
+}
+
+static void s3_pci_shutdown(struct pci_dev *pdev)
+{
+	struct s3_device *s3 = pci_get_drvdata(pdev);
+	drm_atomic_helper_shutdown(&s3->dev);
 }
 
 static const struct pci_device_id s3_devices[] = {
@@ -796,7 +786,6 @@ static const struct pci_device_id s3_devices[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x8901), .driver_data = CHIP_XXX_TRIO64V2_DXGX },
 	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x8A13), .driver_data = CHIP_36X_TRIO3D_1X_2X },
 	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x8904), .driver_data = CHIP_365_TRIO3D },
-/*	TODO: Unsupported because untested.
 	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x8812), .driver_data = CHIP_M65_AURORA64VP },
 	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x8902), .driver_data = CHIP_551_PLATO_PX },
 	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x5631), .driver_data = CHIP_325_VIRGE },
@@ -806,19 +795,15 @@ static const struct pci_device_id s3_devices[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x8A11), .driver_data = CHIP_359_VIRGE_GX2P },
 	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x8A12), .driver_data = CHIP_359_VIRGE_GX2P },
 	{ PCI_DEVICE(PCI_VENDOR_ID_S3, 0x8C01), .driver_data = CHIP_260_VIRGE_MX },
-*/
 	{ /* End of list */ }
 };
 
-// TODO
 static struct pci_driver s3drm_pci_driver = {
 	.name		= DRIVER_NAME,
 	.id_table	= s3_devices,
 	.probe		= s3_pci_probe,
 	.remove		= s3_pci_remove,
-	/*
-	.driver.pm	= &s3_pci_pm_ops,
-	*/
+	.shutdown	= s3_pci_shutdown,
 };
 
 /* ------------------------------------------------------------------------- */
