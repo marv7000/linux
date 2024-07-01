@@ -190,9 +190,10 @@ config TINYDRM_S3
 	tristate "DRM support for S3 Trio"
 	depends on DRM && PCI
 	select DRM_KMS_HELPER
-	select DRM_VRAM_HELPER
-	select DRM_FBDEV_EMULATION
+	select DRM_GEM_SHMEM_HELPER
 	select VGASTATE
+	select I2C
+	select I2C_ALGOBIT
 	help
 	  DRM driver for S3 Trio graphics cards.
 

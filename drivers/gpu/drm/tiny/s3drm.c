@@ -8,6 +8,9 @@
  * linux/drivers/video/fbdev/s3fb.c
  */
 
+#include "drm/drm_connector.h"
+#include <drm/drm_edid.h>
+#include <drm/drm_fourcc.h>
 #include <drm/drm_module.h>
 #include <drm/drm_client.h>
 #include <drm/drm_aperture.h>
@@ -19,11 +22,19 @@
 #include <drm/drm_ioctl.h>
 #include <drm/drm_gem_shmem_helper.h>
 #include <drm/drm_modeset_helper.h>
+#include <drm/drm_probe_helper.h>
+#include <drm/drm_crtc_helper.h>
+#include <drm/drm_framebuffer.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_fb_helper.h>
 #include <drm/drm_fbdev_generic.h>
+#include <drm/drm_gem_framebuffer_helper.h>
+#include <drm/drm_gem_atomic_helper.h>
+#include <drm/drm_damage_helper.h>
+#include <drm/drm_atomic.h>
 
 #include <linux/pci.h>
+#include <linux/array_size.h>
 #include <linux/i2c-algo-bit.h>
 #include <linux/console.h>
 #include <linux/aperture.h>
@@ -154,15 +165,18 @@ struct s3_device {
 	struct mutex open_lock;
 	unsigned int ref_count;
 	u32 pseudo_palette[16];
-#ifdef CONFIG_TINYDRM_S3_DDC
 	u8 __iomem *mmio;
 	bool ddc_registered;
 	struct i2c_adapter ddc_adapter;
 	struct i2c_algo_bit_data ddc_algo;
-#endif
 
 	struct drm_device dev;
 	struct drm_fb_helper helper;
+	struct drm_plane primary_plane;
+	struct drm_crtc crtc;
+	struct drm_encoder encoder;
+	struct drm_connector connector;
+	void __iomem *screen_base;
 };
 
 /* ------------------------------------------------------------------------- */
@@ -318,11 +332,10 @@ static int s3drm_ddc_getsda(void *data)
 
 static int s3drm_setup_ddc_bus(struct s3_device *s3dev)
 {
-	strscpy(s3dev->ddc_adapter.name, s3dev->helper.info->fix.id,
-		sizeof(s3dev->ddc_adapter.name));
+	strcpy(s3dev->ddc_adapter.name, "s3ddc");
 	s3dev->ddc_adapter.owner		= THIS_MODULE;
 	s3dev->ddc_adapter.algo_data	= &s3dev->ddc_algo;
-	s3dev->ddc_adapter.dev.parent	= s3dev->helper.info->device;
+	s3dev->ddc_adapter.dev.parent	= s3dev->dev.dev;
 	s3dev->ddc_algo.setsda		= s3drm_ddc_setsda;
 	s3dev->ddc_algo.setscl		= s3drm_ddc_setscl;
 	s3dev->ddc_algo.getsda		= s3drm_ddc_getsda;
@@ -553,8 +566,345 @@ static const struct drm_driver s3drm_driver = {
 	.fops			= &s3drm_fops,
 };
 
+static const uint32_t s3_formats[] = {
+	DRM_FORMAT_XRGB8888,
+};
+
+static const uint64_t s3_primary_plane_format_modifiers[] = {
+	DRM_FORMAT_MOD_LINEAR,
+	DRM_FORMAT_MOD_INVALID,
+};
+
+
+static int s3_primary_plane_helper_atomic_check(struct drm_plane *plane,
+						       struct drm_atomic_state *state)
+{
+	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state, plane);
+	struct drm_shadow_plane_state *new_shadow_plane_state =
+		to_drm_shadow_plane_state(new_plane_state);
+	struct drm_framebuffer *new_fb = new_plane_state->fb;
+	struct drm_crtc *new_crtc = new_plane_state->crtc;
+	struct drm_crtc_state *new_crtc_state = NULL;
+
+	int ret;
+
+	if (new_crtc)
+		new_crtc_state = drm_atomic_get_new_crtc_state(state, new_crtc);
+
+	ret = drm_atomic_helper_check_plane_state(new_plane_state, new_crtc_state,
+						  DRM_PLANE_NO_SCALING,
+						  DRM_PLANE_NO_SCALING,
+						  false, false);
+	if (ret)
+		return ret;
+	else if (!new_plane_state->visible)
+		return 0;
+
+	void *buf;
+
+	/* format conversion necessary; reserve buffer */
+	buf = drm_format_conv_state_reserve(&new_shadow_plane_state->fmtcnv_state,
+					    new_fb->pitches[0], GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	return 0;
+}
+
+static void s3_primary_plane_helper_atomic_update(struct drm_plane *plane,
+						  struct drm_atomic_state *state)
+{
+	struct drm_plane_state *plane_state = drm_atomic_get_new_plane_state(state, plane);
+	struct drm_plane_state *old_plane_state = drm_atomic_get_old_plane_state(state, plane);
+	struct drm_shadow_plane_state *shadow_plane_state = to_drm_shadow_plane_state(plane_state);
+	struct drm_framebuffer *fb = plane_state->fb;
+	struct drm_device *dev = plane->dev;
+	struct s3_device *s3 = s3_device_of_dev(dev);
+	struct drm_atomic_helper_damage_iter iter;
+	struct drm_rect damage;
+	int ret, idx;
+
+	ret = drm_gem_fb_begin_cpu_access(fb, DMA_FROM_DEVICE);
+	if (ret)
+		return;
+
+	if (!drm_dev_enter(dev, &idx))
+		goto out_drm_gem_fb_end_cpu_access;
+
+	drm_atomic_helper_damage_iter_init(&iter, old_plane_state, plane_state);
+	drm_atomic_for_each_plane_damage(&iter, &damage) {
+		struct drm_rect dst_clip = plane_state->dst;
+		struct iosys_map dst = IOSYS_MAP_INIT_VADDR_IOMEM(s3->screen_base);
+
+		if (!drm_rect_intersect(&dst_clip, &damage))
+			continue;
+
+		iosys_map_incr(&dst, drm_fb_clip_offset(fb->pitches[0], fb->format, &dst_clip));
+		drm_fb_blit(&dst, fb->pitches, fb->format->format, shadow_plane_state->data,
+			    fb, &damage, &shadow_plane_state->fmtcnv_state);
+	}
+
+	drm_dev_exit(idx);
+out_drm_gem_fb_end_cpu_access:
+	drm_gem_fb_end_cpu_access(fb, DMA_FROM_DEVICE);
+}
+
+static void s3_primary_plane_helper_atomic_disable(struct drm_plane *plane,
+						   struct drm_atomic_state *state)
+{
+	return;
+}
+
+static const struct drm_plane_helper_funcs s3_primary_plane_helper_funcs = {
+	DRM_GEM_SHADOW_PLANE_HELPER_FUNCS,
+	.atomic_check = s3_primary_plane_helper_atomic_check,
+	.atomic_update = s3_primary_plane_helper_atomic_update,
+	.atomic_disable = s3_primary_plane_helper_atomic_disable,
+};
+
+static const struct drm_plane_funcs s3_primary_plane_funcs = {
+	.update_plane = drm_atomic_helper_update_plane,
+	.disable_plane = drm_atomic_helper_disable_plane,
+	.destroy = drm_plane_cleanup,
+	DRM_GEM_SHADOW_PLANE_FUNCS,
+};
+
+#if 0
+static enum drm_mode_status s3_crtc_helper_mode_valid(struct drm_crtc *crtc,
+							     const struct drm_display_mode *mode)
+{
+	struct s3_device *s3 = s3_device_of_dev(crtc->dev);
+
+	return drm_crtc_helper_mode_valid_fixed(crtc, mode, &s3->mode);
+}
+
+#endif
+
+/*
+ * The CRTC is always enabled. Screen updates are performed by
+ * the primary plane's atomic_update function. Disabling clears
+ * the screen in the primary plane's atomic_disable function.
+ */
+static const struct drm_crtc_helper_funcs s3_crtc_helper_funcs = {
+	/* .mode_valid = s3_crtc_helper_mode_valid, */
+	.atomic_check = drm_crtc_helper_atomic_check,
+};
+
+static const struct drm_crtc_funcs s3_crtc_funcs = {
+	.reset = drm_atomic_helper_crtc_reset,
+	.destroy = drm_crtc_cleanup,
+	.set_config = drm_atomic_helper_set_config,
+	.page_flip = drm_atomic_helper_page_flip,
+	.atomic_duplicate_state = drm_atomic_helper_crtc_duplicate_state,
+	.atomic_destroy_state = drm_atomic_helper_crtc_destroy_state,
+};
+
+static const struct drm_encoder_funcs s3_encoder_funcs = {
+	.destroy = drm_encoder_cleanup,
+};
+
+static int s3_connector_helper_get_modes(struct drm_connector *connector)
+{
+	struct edid *edid;
+	int count;
+
+	if (!connector->ddc)
+		goto err_drm_connector_update_edid_property;
+
+	edid = drm_get_edid(connector, connector->ddc);
+	if (!edid)
+		return 0;
+
+	count = drm_add_edid_modes(connector, edid);
+	kfree(edid);
+
+	return count;
+
+err_drm_connector_update_edid_property:
+	drm_connector_update_edid_property(connector, NULL);
+	return 0;
+}
+
+static const struct drm_connector_helper_funcs s3_connector_helper_funcs = {
+	.get_modes = s3_connector_helper_get_modes,
+};
+
+
+static const struct drm_mode_config_funcs s3_mode_config_funcs = {
+	.fb_create = drm_gem_fb_create_with_dirty,
+	.atomic_check = drm_atomic_helper_check,
+	.atomic_commit = drm_atomic_helper_commit,
+};
+
+static const struct drm_connector_funcs s3_connector_funcs = {
+	.reset = drm_atomic_helper_connector_reset,
+	.fill_modes = drm_helper_probe_single_connector_modes,
+	.destroy = drm_connector_cleanup,
+	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
+	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
+};
+
+
 /* ------------------------------------------------------------------------- */
 /* PCI                                                                       */
+
+
+static int s3_load(struct s3_device *s3, const struct pci_device_id *id)
+{
+	int ret = 0;
+	u8 regval, cr38, cr39;
+	struct drm_plane *primary_plane;
+	struct drm_crtc *crtc;
+	struct drm_encoder *encoder;
+	struct drm_connector *connector;
+	struct pci_bus_region bus_reg;
+	struct resource vga_res;
+	struct drm_device *dev = &s3->dev;
+	struct pci_dev *pdev = to_pci_dev(dev->dev);
+
+
+	pr_err("%s:%d\n", __FILE__, __LINE__);
+
+	ret = pci_request_regions(pdev, DRIVER_NAME);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "cannot reserve framebuffer region\n");
+		return ret;
+	}
+
+
+	pr_err("%s:%d\n", __FILE__, __LINE__);
+
+	/* Map physical IO memory address into kernel space */
+	s3->screen_base = pcim_iomap(pdev, 0, 0);
+	if (!s3->screen_base) {
+		ret = -ENOMEM;
+		dev_err(&pdev->dev, "iomap for framebuffer failed\n");
+		return ret;
+	}
+
+	bus_reg.start = 0;
+	bus_reg.end = 64 * 1024;
+
+	vga_res.flags = IORESOURCE_IO;
+
+
+	pr_err("%s:%d\n", __FILE__, __LINE__);
+
+	pcibios_bus_to_resource(pdev->bus, &vga_res, &bus_reg);
+
+	s3->state.vgabase = (void __iomem *) (unsigned long) vga_res.start;
+
+	/* Unlock regs */
+	cr38 = vga_rcrt(s3->state.vgabase, 0x38);
+	cr39 = vga_rcrt(s3->state.vgabase, 0x39);
+	vga_wseq(s3->state.vgabase, 0x08, 0x06);
+	vga_wcrt(s3->state.vgabase, 0x38, 0x48);
+	vga_wcrt(s3->state.vgabase, 0x39, 0xA5);
+
+	pr_err("%s:%d\n", __FILE__, __LINE__);
+
+	/* Identify chip type */
+	s3->chip = id->driver_data & CHIP_MASK;
+	s3->rev = vga_rcrt(s3->state.vgabase, 0x2f);
+	if (s3->chip & CHIP_UNDECIDED_FLAG)
+		s3->chip = s3_identification(s3);
+
+	/* Find MCLK frequency */
+	regval = vga_rseq(s3->state.vgabase, 0x10);
+	s3->mclk_freq = ((vga_rseq(s3->state.vgabase, 0x11) + 2) * 14318) / ((regval & 0x1F)  + 2);
+	s3->mclk_freq = s3->mclk_freq >> (regval >> 5);
+
+	/* Restore locks */
+	vga_wcrt(s3->state.vgabase, 0x38, cr38);
+	vga_wcrt(s3->state.vgabase, 0x39, cr39);
+
+
+	pr_err("%s:%d\n", __FILE__, __LINE__);
+
+	/* Setup DDC via I2C */
+	s3drm_setup_ddc_bus(s3);
+
+	pr_err("%s:%d\n", __FILE__, __LINE__);
+
+	ret = drmm_mode_config_init(dev);
+	if (ret)
+		return ret;
+
+	dev->mode_config.min_width = 640;
+	dev->mode_config.max_width = 1024;
+	dev->mode_config.min_height = 480;
+	dev->mode_config.max_height = 768;
+	dev->mode_config.preferred_depth = 32;
+	dev->mode_config.funcs = &s3_mode_config_funcs;
+
+	/* Primary plane */
+
+	primary_plane = &s3->primary_plane;
+	ret = drm_universal_plane_init(dev, primary_plane, 0, &s3_primary_plane_funcs,
+				       s3_formats, ARRAY_SIZE(s3_formats),
+				       s3_primary_plane_format_modifiers,
+				       DRM_PLANE_TYPE_PRIMARY, NULL);
+
+	pr_err("%s:%d\n", __FILE__, __LINE__);
+	if (ret)
+		return ret;
+	drm_plane_helper_add(primary_plane, &s3_primary_plane_helper_funcs);
+
+	pr_err("%s:%d\n", __FILE__, __LINE__);
+	drm_plane_enable_fb_damage_clips(primary_plane);
+
+
+	pr_err("%s:%d\n", __FILE__, __LINE__);
+
+	/* CRTC */
+
+	crtc = &s3->crtc;
+	ret = drm_crtc_init_with_planes(dev, crtc, primary_plane, NULL,
+					&s3_crtc_funcs, NULL);
+
+	pr_err("%s:%d\n", __FILE__, __LINE__);
+	if (ret)
+		return ret;
+	drm_crtc_helper_add(crtc, &s3_crtc_helper_funcs);
+
+	pr_err("%s:%d\n", __FILE__, __LINE__);
+	/* Encoder */
+
+	encoder = &s3->encoder;
+	ret = drm_encoder_init(dev, encoder, &s3_encoder_funcs,
+			       DRM_MODE_ENCODER_DAC, NULL);
+
+	pr_err("%s:%d\n", __FILE__, __LINE__);
+	if (ret)
+		return ret;
+	encoder->possible_crtcs = drm_crtc_mask(crtc);
+
+	pr_err("%s:%d\n", __FILE__, __LINE__);
+	/* Connector */
+
+	connector = &s3->connector;
+	ret = drm_connector_init_with_ddc(dev, connector, &s3_connector_funcs,
+					  DRM_MODE_CONNECTOR_VGA, &s3->ddc_adapter);
+
+	pr_err("%s:%d\n", __FILE__, __LINE__);
+	if (ret)
+		return ret;
+	drm_connector_helper_add(connector, &s3_connector_helper_funcs);
+
+	pr_err("%s:%d\n", __FILE__, __LINE__);
+
+	ret = drm_connector_attach_encoder(connector, encoder);
+
+	pr_err("%s:%d\n", __FILE__, __LINE__);
+	if (ret)
+		return ret;
+
+	drm_mode_config_reset(dev);
+
+	pr_err("%s:%d\n", __FILE__, __LINE__);
+
+	return ret;
+}
 
 // TODO
 static int s3_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
@@ -562,29 +912,8 @@ static int s3_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	struct pci_bus_region bus_reg;
 	struct resource vga_res;
 	struct s3_device *s3;
-	struct fb_info *info;
 	int ret;
 	u8 regval, cr38, cr39;
-
-	ret = drm_aperture_remove_conflicting_pci_framebuffers(pdev, &s3drm_driver);
-	if (ret)
-		return ret;
-
-	/* Allocate and fill driver data structure */
-	s3 = devm_drm_dev_alloc(&pdev->dev, &s3drm_driver, struct s3_device, dev);
-	if (!s3)
-		return -ENOMEM;
-
-	/* Call fb_helper functions to allocate fb_info */
-	drm_fb_helper_prepare(&s3->dev, &s3->helper, 32, &s3drm_fb_helper_funcs);
-	ret = drm_fb_helper_init(&s3->dev, &s3->helper);
-	if (ret) {
-		dev_err(&(pdev->dev), "failed to initialize fb helper\n");
-		return ret;
-	}
-
-	/* Use the fb_info struct from the device */
-	info = s3->dev.fb_helper->info;
 
 	/* Ignore secondary VGA device because there is no VGA arbitration */
 	if (!svga_primary_device(pdev)) {
@@ -592,16 +921,39 @@ static int s3_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		return -ENODEV;
 	}
 
+	// ret = drm_aperture_remove_conflicting_pci_framebuffers(pdev, &s3drm_driver);
+	//if (ret)
+	//	return ret;
+
+	pr_err("%s:%d\n", __FILE__, __LINE__);
+
+	/* Allocate and fill driver data structure */
+	s3 = devm_drm_dev_alloc(&pdev->dev, &s3drm_driver, struct s3_device, dev);
+	if (!s3)
+		return -ENOMEM;
+
+	pr_err("%s:%d\n", __FILE__, __LINE__);
+#if 0
+	/* Use the fb_info struct from the device */
+	info = s3->dev.fb_helper->info;
+#endif
+
 	/* Prepare PCI device */
 	ret = pcim_enable_device(pdev);
 	if (ret < 0) {
-		dev_err(info->device, "cannot enable PCI device\n");
+		dev_err(&pdev->dev, "cannot enable PCI device\n");
 		return ret;
 	}
 
+	pr_err("%s:%d\n", __FILE__, __LINE__);
+	/* Record a reference to the driver data */
+	pci_set_drvdata(pdev, s3);
+
+	s3->chip = s3_identification(s3);
+#if 0
 	ret = pci_request_regions(pdev, DRIVER_NAME);
 	if (ret < 0) {
-		dev_err(info->device, "cannot reserve framebuffer region\n");
+		dev_err(&pdev->dev, "cannot reserve framebuffer region\n");
 		return ret;
 	}
 
@@ -752,22 +1104,32 @@ static int s3_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 			}
 		}
 #endif
+#else
 
-	drm_fbdev_generic_setup(&s3->dev, 32);
+	pr_err("%s:%d\n", __FILE__, __LINE__);
+	ret = s3_load(s3, id);
+	if (ret)
+		return ret;
+#endif
 
-	drm_info(info, "%s on %s, %d MB RAM, %d MHz MCLK\n",
+	ret = drm_dev_register(&s3->dev, 0);
+	if (ret)
+		return ret;
+
+	//drm_fbdev_generic_setup(&s3->dev, 32);
+
+#if 0
+	drm_info(&s3->dev, "%s on %s, %d MB RAM, %d MHz MCLK\n",
 		info->fix.id, pci_name(pdev),
 		info->fix.smem_len >> 20, (s3->mclk_freq + 500) / 1000);
+#endif
 
 	if (s3->chip == CHIP_UNKNOWN)
-		drm_info(info, "unknown chip, CR2D=%x, CR2E=%x, CRT2F=%x, CRT30=%x\n",
+		drm_info(&s3->dev, "unknown chip, CR2D=%x, CR2E=%x, CRT2F=%x, CRT30=%x\n",
 			vga_rcrt(s3->state.vgabase, 0x2d),
 			vga_rcrt(s3->state.vgabase, 0x2e),
 			vga_rcrt(s3->state.vgabase, 0x2f),
 			vga_rcrt(s3->state.vgabase, 0x30));
-
-	/* Record a reference to the driver data */
-	pci_set_drvdata(pdev, s3);
 
 	return 0;
 	// TODO: Error handling.
