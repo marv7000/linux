@@ -9,6 +9,7 @@
  */
 
 #include "drm/drm_connector.h"
+#include "linux/types.h"
 #include <drm/drm_edid.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_module.h>
@@ -822,6 +823,17 @@ static int s3_load(struct s3_device *s3, const struct pci_device_id *id)
 	pr_err("%s:%d\n", __FILE__, __LINE__);
 
 	/* Setup DDC via I2C */
+	resource_size_t smem_start = pci_resource_start(pdev, 0);
+	resource_size_t smem_len = pci_resource_len(pdev, 0);
+	if (s3drm_ddc_needs_mmio(s3->chip)) {
+		s3->mmio = ioremap(smem_start + MMIO_OFFSET, MMIO_SIZE);
+		if (s3->mmio)
+			svga_wcrt_mask(s3->state.vgabase, 0x53, 0x08, 0x08);	/* enable MMIO */
+		else
+			dev_err(&pdev->dev, "unable to map MMIO at 0x%zx, disabling DDC",
+				(size_t)smem_start + MMIO_OFFSET);
+	}
+
 	s3drm_setup_ddc_bus(s3);
 
 	pr_err("%s:%d\n", __FILE__, __LINE__);
