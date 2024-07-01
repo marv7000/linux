@@ -726,8 +726,24 @@ err_drm_connector_update_edid_property:
 	return 0;
 }
 
+static int drm_connector_helper_detect_from_ddc(struct drm_connector *connector,
+					 struct drm_modeset_acquire_ctx *ctx,
+					 bool force)
+{
+	struct i2c_adapter *ddc = connector->ddc;
+
+	if (!ddc)
+		return connector_status_unknown;
+
+	if (drm_probe_ddc(ddc))
+		return connector_status_connected;
+
+	return connector_status_disconnected;
+}
+
 static const struct drm_connector_helper_funcs s3_connector_helper_funcs = {
 	.get_modes = s3_connector_helper_get_modes,
+	.detect_ctx = drm_connector_helper_detect_from_ddc,
 };
 
 
@@ -903,6 +919,8 @@ static int s3_load(struct s3_device *s3, const struct pci_device_id *id)
 		return ret;
 	drm_connector_helper_add(connector, &s3_connector_helper_funcs);
 
+	connector->polled = DRM_CONNECTOR_POLL_CONNECT | DRM_CONNECTOR_POLL_DISCONNECT;
+
 	pr_err("%s:%d\n", __FILE__, __LINE__);
 
 	ret = drm_connector_attach_encoder(connector, encoder);
@@ -912,6 +930,7 @@ static int s3_load(struct s3_device *s3, const struct pci_device_id *id)
 		return ret;
 
 	drm_mode_config_reset(dev);
+	drm_kms_helper_poll_init(dev);
 
 	pr_err("%s:%d\n", __FILE__, __LINE__);
 
