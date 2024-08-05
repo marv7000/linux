@@ -1568,6 +1568,7 @@ static int __drm_fb_helper_find_sizes(struct drm_fb_helper *fb_helper,
 	/* first up get a count of crtcs now in use and new min/maxes width/heights */
 	crtc_count = 0;
 	drm_client_for_each_modeset(mode_set, client) {
+		drm_info(dev, "\tcrtc_count = %i\tsizes->fb_width = %u\t sizes->fb_height = %u\n", crtc_count, sizes->fb_width, sizes->fb_height);
 		struct drm_display_mode *desired_mode;
 		int x, y, j;
 		/* in case of tile group, are we the last tile vert or horiz?
@@ -1612,7 +1613,6 @@ static int __drm_fb_helper_find_sizes(struct drm_fb_helper *fb_helper,
 
 	if (crtc_count == 0 || sizes->fb_width == -1 || sizes->fb_height == -1) {
 		drm_info(dev, "Cannot find any crtc or sizes\n");
-		drm_info(dev, "\tcrtc_count = %i;\tsizes->fb_width = %u\t sizes->fb_height = %u\n", crtc_count, sizes->fb_width, sizes->fb_height);
 		return -EAGAIN;
 	}
 
