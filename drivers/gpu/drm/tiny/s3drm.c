@@ -415,6 +415,8 @@ static int s3drm_set_par(struct drm_crtc *crtc, struct drm_display_mode *mode)
 	u32 htotal, hsstart, value, multiplex;
 	u32 hmul = 1;
 
+	DRM_INFO("s3drm_set_par\n");
+
 	if (bpp != 0) {
 		crtc->primary->state->fb->pitches[0] = mode->hdisplay * bpp / 8;
 		offset_value = (mode->hdisplay * bpp) / 64;
@@ -524,6 +526,8 @@ static int s3drm_set_par(struct drm_crtc *crtc, struct drm_display_mode *mode)
 	svga_wcrt_mask(s3->state.vgabase, 0x67, 0xD0, 0xF0);
 
 	s3_set_pixclock(s3, mode->crtc_clock);
+
+	DRM_INFO("s3_set_pixclock\n");
 
 	/* Construct a fake fb_var_screeninfo to pass to svga_set_timings */
 	struct fb_var_screeninfo fb_mode;
@@ -635,6 +639,7 @@ static int s3drm_fb_helper_probe(struct drm_fb_helper *fb_helper, struct drm_fb_
 
 	s3 = s3_device_of_dev(fb_helper->dev);
 	s3->dev.fb_helper->info = drm_fb_helper_alloc_info(fb_helper);
+
 	return 0;
 }
 
@@ -773,7 +778,9 @@ static enum drm_mode_status s3_crtc_helper_mode_valid(struct drm_crtc *crtc,
 {
 	struct s3_device *s3 = s3_device_of_dev(crtc->dev);
 	// s3drm_check_var();
-	return drm_crtc_helper_mode_valid_fixed(crtc, mode, &s3->crtc.mode);
+	enum drm_mode_status ret = drm_crtc_helper_mode_valid_fixed(crtc, mode, &s3->crtc.mode);
+	DRM_INFO("s3_crtc_helper_mode_valid = %i\n", ret);
+	return ret;
 }
 
 /*
@@ -1004,8 +1011,6 @@ static int s3_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	struct s3_device *s3;
 	int ret;
 
-	DRM_INFO("start s3_pci_probe\n");
-
 	/* Ignore secondary VGA device because there is no VGA arbitration */
 	if (!svga_primary_device(pdev)) {
 		dev_info(&(pdev->dev), "ignoring secondary device\n");
@@ -1045,8 +1050,6 @@ static int s3_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 			vga_rcrt(s3->state.vgabase, 0x2e),
 			vga_rcrt(s3->state.vgabase, 0x2f),
 			vga_rcrt(s3->state.vgabase, 0x30));
-
-	DRM_INFO("done s3_pci_probe\n");
 
 	return 0;
 	// TODO: Error handling.
