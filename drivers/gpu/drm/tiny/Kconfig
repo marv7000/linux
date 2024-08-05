@@ -194,18 +194,11 @@ config TINYDRM_S3
 	select VGASTATE
 	select I2C
 	select I2C_ALGOBIT
+	select FB_SVGALIB
 	help
 	  DRM driver for S3 Trio graphics cards.
 
 	  If M is selected the module will be called s3drm.
-
-config TINYDRM_S3_DDC
-	bool "DDC for S3 support"
-	depends on TINYDRM_S3
-	default y
-	help
-	  Say Y here if you want DDC support for your S3 graphics card using
-	  the DRM driver.
 
 config TINYDRM_ST7586
 	tristate "DRM support for Sitronix ST7586 display panels"
