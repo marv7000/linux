@@ -1612,6 +1612,7 @@ static int __drm_fb_helper_find_sizes(struct drm_fb_helper *fb_helper,
 
 	if (crtc_count == 0 || sizes->fb_width == -1 || sizes->fb_height == -1) {
 		drm_info(dev, "Cannot find any crtc or sizes\n");
+		drm_info(dev, "\tcrtc_count = %i;\tsizes->fb_width = %u\t sizes->fb_height = %u\n", crtc_count, sizes->fb_width, sizes->fb_height);
 		return -EAGAIN;
 	}
 

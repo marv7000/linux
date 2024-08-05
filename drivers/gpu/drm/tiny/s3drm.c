@@ -935,8 +935,8 @@ static int s3_load(struct s3_device *s3, const struct pci_device_id *id)
 		return ret;
 
 	dev->mode_config.min_width = 640;
-	dev->mode_config.max_width = 1024;
 	dev->mode_config.min_height = 480;
+	dev->mode_config.max_width = 1024;
 	dev->mode_config.max_height = 768;
 	dev->mode_config.preferred_depth = 32;
 	dev->mode_config.funcs = &s3_mode_config_funcs;
@@ -1004,6 +1004,8 @@ static int s3_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	struct s3_device *s3;
 	int ret;
 
+	DRM_INFO("start s3_pci_probe\n");
+
 	/* Ignore secondary VGA device because there is no VGA arbitration */
 	if (!svga_primary_device(pdev)) {
 		dev_info(&(pdev->dev), "ignoring secondary device\n");
@@ -1043,6 +1045,8 @@ static int s3_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 			vga_rcrt(s3->state.vgabase, 0x2e),
 			vga_rcrt(s3->state.vgabase, 0x2f),
 			vga_rcrt(s3->state.vgabase, 0x30));
+
+	DRM_INFO("done s3_pci_probe\n");
 
 	return 0;
 	// TODO: Error handling.
