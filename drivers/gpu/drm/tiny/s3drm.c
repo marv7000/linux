@@ -416,7 +416,7 @@ static int s3drm_set_par(struct drm_crtc *crtc, struct drm_display_mode *mode)
 	u32 hmul = 1;
 
 	if (bpp != 0) {
-		crtc->primary->state->fb->pitches[0] = (mode->hdisplay * bpp) / 8;
+		crtc->primary->state->fb->pitches[0] = (mode->hdisplay * bpp);
 		drm_info(&(s3->dev), "pitch: %u\n", crtc->primary->state->fb->pitches[0]);
 
 		offset_value = (mode->hdisplay * bpp) / 64;
