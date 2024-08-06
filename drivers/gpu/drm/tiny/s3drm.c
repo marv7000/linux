@@ -416,7 +416,7 @@ static int s3drm_set_par(struct drm_crtc *crtc, struct drm_display_mode *mode)
 	u32 hmul = 1;
 
 	if (bpp != 0) {
-		crtc->primary->state->fb->pitches[0] = (mode->hdisplay * bpp);
+		crtc->primary->state->fb->pitches[0] = (mode->hdisplay * bpp) / 8;
 		drm_info(&(s3->dev), "pitch: %u\n", crtc->primary->state->fb->pitches[0]);
 
 		offset_value = (mode->hdisplay * bpp) / 64;
@@ -527,6 +527,11 @@ static int s3drm_set_par(struct drm_crtc *crtc, struct drm_display_mode *mode)
 	/* For now, force 32 bpp */
 	svga_wcrt_mask(s3->state.vgabase, 0x50, 0x30, 0x30);
 	svga_wcrt_mask(s3->state.vgabase, 0x67, 0xD0, 0xF0);
+
+	if (s3->chip != CHIP_988_VIRGE_VX) {
+		svga_wseq_mask(s3->state.vgabase, 0x15, multiplex ? 0x10 : 0x00, 0x10);
+		svga_wseq_mask(s3->state.vgabase, 0x18, multiplex ? 0x80 : 0x00, 0x80);
+	}
 
 	s3_set_pixclock(s3, mode->crtc_clock);
 
@@ -948,7 +953,6 @@ static int s3_load(struct s3_device *s3, const struct pci_device_id *id)
 	dev->mode_config.funcs = &s3_mode_config_funcs;
 
 	/* Primary plane */
-
 	primary_plane = &s3->primary_plane;
 	ret = drm_universal_plane_init(dev, primary_plane, 0, &s3_primary_plane_funcs,
 				       s3_formats, ARRAY_SIZE(s3_formats),
@@ -959,10 +963,9 @@ static int s3_load(struct s3_device *s3, const struct pci_device_id *id)
 		return ret;
 	drm_plane_helper_add(primary_plane, &s3_primary_plane_helper_funcs);
 
-	drm_plane_enable_fb_damage_clips(primary_plane);
+	//drm_plane_enable_fb_damage_clips(primary_plane);
 
 	/* CRTC */
-
 	crtc = &s3->crtc;
 	ret = drm_crtc_init_with_planes(dev, crtc, primary_plane, NULL,
 					&s3_crtc_funcs, NULL);
@@ -972,7 +975,6 @@ static int s3_load(struct s3_device *s3, const struct pci_device_id *id)
 	drm_crtc_helper_add(crtc, &s3_crtc_helper_funcs);
 
 	/* Encoder */
-
 	encoder = &s3->encoder;
 	ret = drm_encoder_init(dev, encoder, &s3_encoder_funcs,
 			       DRM_MODE_ENCODER_DAC, NULL);
@@ -982,19 +984,17 @@ static int s3_load(struct s3_device *s3, const struct pci_device_id *id)
 	encoder->possible_crtcs = drm_crtc_mask(crtc);
 
 	/* Connector */
-
 	connector = &s3->connector;
 	ret = drm_connector_init_with_ddc(dev, connector, &s3_connector_funcs,
 					  DRM_MODE_CONNECTOR_VGA, &s3->ddc_adapter);
-
 	if (ret)
 		return ret;
+
 	drm_connector_helper_add(connector, &s3_connector_helper_funcs);
 
 	connector->polled = DRM_CONNECTOR_POLL_CONNECT | DRM_CONNECTOR_POLL_DISCONNECT;
 
 	ret = drm_connector_attach_encoder(connector, encoder);
-
 	if (ret)
 		return ret;
 
