@@ -415,12 +415,15 @@ static int s3drm_set_par(struct drm_crtc *crtc, struct drm_display_mode *mode)
 	u32 htotal, hsstart, value, multiplex;
 	u32 hmul = 1;
 
-	DRM_INFO("s3drm_set_par\n");
-
 	if (bpp != 0) {
-		crtc->primary->state->fb->pitches[0] = mode->hdisplay * bpp / 8;
+		crtc->primary->state->fb->pitches[0] = (mode->hdisplay * bpp) / 8;
+		drm_info(&(s3->dev), "pitch: %u\n", crtc->primary->state->fb->pitches[0]);
+
 		offset_value = (mode->hdisplay * bpp) / 64;
+		drm_info(&(s3->dev), "offset_value: %u\n", offset_value);
+
 		screen_size = mode->vdisplay * crtc->primary->state->fb->pitches[0];
+		drm_info(&(s3->dev), "screen_size: %u\n", screen_size);
 	} else {
 		offset_value = mode->hdisplay / 16;
 		screen_size = (mode->hdisplay * mode->vdisplay) / 64;
@@ -526,8 +529,6 @@ static int s3drm_set_par(struct drm_crtc *crtc, struct drm_display_mode *mode)
 	svga_wcrt_mask(s3->state.vgabase, 0x67, 0xD0, 0xF0);
 
 	s3_set_pixclock(s3, mode->crtc_clock);
-
-	DRM_INFO("s3_set_pixclock\n");
 
 	/* Construct a fake fb_var_screeninfo to pass to svga_set_timings */
 	struct fb_var_screeninfo fb_mode;
@@ -777,6 +778,7 @@ static const struct drm_plane_funcs s3_primary_plane_funcs = {
 static enum drm_mode_status s3_crtc_helper_mode_valid(struct drm_crtc *crtc,
 							     const struct drm_display_mode *mode)
 {
+	// TODO ?
 	return MODE_OK;
 }
 
