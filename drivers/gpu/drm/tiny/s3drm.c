@@ -416,7 +416,7 @@ static int s3drm_set_par(struct drm_crtc *crtc, struct drm_display_mode *mode)
 	u32 hmul = 1;
 
 	if (bpp != 0) {
-		crtc->primary->state->fb->pitches[0] = (mode->hdisplay * bpp) / 8;
+		crtc->primary->state->fb->pitches[0] = mode->hdisplay * (bpp / 8);
 		drm_info(&(s3->dev), "pitch: %u\n", crtc->primary->state->fb->pitches[0]);
 
 		offset_value = (mode->hdisplay * bpp) / 64;
@@ -718,7 +718,7 @@ static void s3_handle_damage(struct s3_device *s3, const struct iosys_map *vmap,
 {
 	struct iosys_map dst = IOSYS_MAP_INIT_VADDR_IOMEM(s3->screen_base);
 
-	iosys_map_incr(&dst, drm_fb_clip_offset(fb->pitches[0], fb->format, clip) * 2);
+	iosys_map_incr(&dst, drm_fb_clip_offset(fb->pitches[0], fb->format, clip) / 2);
 	drm_fb_memcpy(&dst, fb->pitches, vmap, fb, clip);
 }
 
