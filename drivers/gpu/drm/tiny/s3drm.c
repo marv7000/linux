@@ -776,11 +776,7 @@ static const struct drm_plane_funcs s3_primary_plane_funcs = {
 static enum drm_mode_status s3_crtc_helper_mode_valid(struct drm_crtc *crtc,
 							     const struct drm_display_mode *mode)
 {
-	struct s3_device *s3 = s3_device_of_dev(crtc->dev);
-	// s3drm_check_var();
-	enum drm_mode_status ret = drm_crtc_helper_mode_valid_fixed(crtc, mode, &s3->crtc.mode);
-	DRM_INFO("s3_crtc_helper_mode_valid = %i\n", ret);
-	return ret;
+	return MODE_OK;
 }
 
 /*
