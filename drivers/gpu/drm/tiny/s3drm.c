@@ -707,6 +707,15 @@ static int s3_primary_plane_helper_atomic_check(struct drm_plane *plane,
 	return 0;
 }
 
+static void s3_handle_damage(struct s3_device *s3, const struct iosys_map *vmap,
+			     struct drm_framebuffer *fb, struct drm_rect *clip)
+{
+	struct iosys_map dst = IOSYS_MAP_INIT_VADDR_IOMEM(s3->screen_base);
+
+	iosys_map_incr(&dst, drm_fb_clip_offset(fb->pitches[0], fb->format, clip));
+	drm_fb_memcpy(&dst, fb->pitches, vmap, fb, clip);
+}
+
 static void s3_primary_plane_helper_atomic_update(struct drm_plane *plane,
 						  struct drm_atomic_state *state)
 {
@@ -729,15 +738,7 @@ static void s3_primary_plane_helper_atomic_update(struct drm_plane *plane,
 
 	drm_atomic_helper_damage_iter_init(&iter, old_plane_state, plane_state);
 	drm_atomic_for_each_plane_damage(&iter, &damage) {
-		struct drm_rect dst_clip = plane_state->dst;
-		struct iosys_map dst = IOSYS_MAP_INIT_VADDR_IOMEM(s3->screen_base);
-
-		if (!drm_rect_intersect(&dst_clip, &damage))
-			continue;
-
-		iosys_map_incr(&dst, drm_fb_clip_offset(fb->pitches[0], fb->format, &dst_clip));
-		drm_fb_blit(&dst, fb->pitches, fb->format->format, shadow_plane_state->data,
-			    fb, &damage, &shadow_plane_state->fmtcnv_state);
+		s3_handle_damage(s3, shadow_plane_state->data, fb, &damage);
 	}
 
 	drm_dev_exit(idx);
