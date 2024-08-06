@@ -143,10 +143,8 @@ static const struct svga_fb_format s3drm_formats[] = {
 	SVGA_FORMAT_END
 };
 
-static const struct svga_pll s3_pll = {3, 129, 3, 33, 0, 3,
-	35000, 240000, 14318};
-static const struct svga_pll s3_trio3d_pll = {3, 129, 3, 31, 0, 4,
-	230000, 460000, 14318};
+static const struct svga_pll s3_pll = {3, 129, 3, 33, 0, 3, 35000, 240000, 14318};
+static const struct svga_pll s3_trio3d_pll = {3, 129, 3, 31, 0, 4, 230000, 460000, 14318};
 
 static const int s3_memsizes[] = {4096, 0, 3072, 8192, 2048, 6144, 1024, 512};
 
@@ -718,14 +716,14 @@ static void s3_handle_damage(struct s3_device *s3, const struct iosys_map *vmap,
 {
 	struct iosys_map dst = IOSYS_MAP_INIT_VADDR_IOMEM(s3->screen_base);
 
-	iosys_map_incr(&dst, drm_fb_clip_offset(fb->pitches[0], fb->format, clip) / 2);
+	iosys_map_incr(&dst, drm_fb_clip_offset(fb->pitches[0], fb->format, clip));
 	drm_fb_memcpy(&dst, fb->pitches, vmap, fb, clip);
 }
 
 static void s3_primary_plane_helper_atomic_update(struct drm_plane *plane,
 						  struct drm_atomic_state *state)
 {
-	struct drm_plane_state *plane_state = drm_atomic_get_new_plane_state(state, plane);
+	struct drm_plane_state *plane_state = plane->state;
 	struct drm_plane_state *old_plane_state = drm_atomic_get_old_plane_state(state, plane);
 	struct drm_shadow_plane_state *shadow_plane_state = to_drm_shadow_plane_state(plane_state);
 	struct drm_framebuffer *fb = plane_state->fb;
@@ -902,9 +900,7 @@ static int s3_load(struct s3_device *s3, const struct pci_device_id *id)
 	bus_reg.end = 64 * 1024;
 
 	vga_res.flags = IORESOURCE_IO;
-
 	pcibios_bus_to_resource(pdev->bus, &vga_res, &bus_reg);
-
 	s3->state.vgabase = (void __iomem *) (unsigned long) vga_res.start;
 
 	/* Unlock regs */
@@ -958,7 +954,6 @@ static int s3_load(struct s3_device *s3, const struct pci_device_id *id)
 				       s3_formats, ARRAY_SIZE(s3_formats),
 				       s3_primary_plane_format_modifiers,
 				       DRM_PLANE_TYPE_PRIMARY, NULL);
-
 	if (ret)
 		return ret;
 	drm_plane_helper_add(primary_plane, &s3_primary_plane_helper_funcs);
@@ -969,7 +964,6 @@ static int s3_load(struct s3_device *s3, const struct pci_device_id *id)
 	crtc = &s3->crtc;
 	ret = drm_crtc_init_with_planes(dev, crtc, primary_plane, NULL,
 					&s3_crtc_funcs, NULL);
-
 	if (ret)
 		return ret;
 	drm_crtc_helper_add(crtc, &s3_crtc_helper_funcs);
@@ -978,7 +972,6 @@ static int s3_load(struct s3_device *s3, const struct pci_device_id *id)
 	encoder = &s3->encoder;
 	ret = drm_encoder_init(dev, encoder, &s3_encoder_funcs,
 			       DRM_MODE_ENCODER_DAC, NULL);
-
 	if (ret)
 		return ret;
 	encoder->possible_crtcs = drm_crtc_mask(crtc);
@@ -1004,7 +997,6 @@ static int s3_load(struct s3_device *s3, const struct pci_device_id *id)
 	return ret;
 }
 
-// TODO
 static int s3_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	struct s3_device *s3;
@@ -1051,7 +1043,6 @@ static int s3_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 			vga_rcrt(s3->state.vgabase, 0x30));
 
 	return 0;
-	// TODO: Error handling.
 }
 
 static void s3_pci_remove(struct pci_dev *pdev)
