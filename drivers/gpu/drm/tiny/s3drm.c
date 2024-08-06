@@ -53,10 +53,10 @@
 #define DRIVER_NAME		"s3drm"
 #define DRIVER_DESC		"DRM driver for S3 Trio"
 #define DRIVER_LICENSE		"GPL"
-#define DRIVER_DATE		"20240610"
+#define DRIVER_DATE		"20240806"
 #define DRIVER_MAJOR		0
-#define DRIVER_MINOR		0
-#define DRIVER_PATCHLEVEL	1
+#define DRIVER_MINOR		1
+#define DRIVER_PATCHLEVEL	0
 
 #define MMIO_OFFSET		0x1000000
 #define MMIO_SIZE		0x10000
@@ -718,7 +718,7 @@ static void s3_handle_damage(struct s3_device *s3, const struct iosys_map *vmap,
 {
 	struct iosys_map dst = IOSYS_MAP_INIT_VADDR_IOMEM(s3->screen_base);
 
-	iosys_map_incr(&dst, drm_fb_clip_offset(fb->pitches[0], fb->format, clip));
+	iosys_map_incr(&dst, drm_fb_clip_offset(fb->pitches[0], fb->format, clip) * 2);
 	drm_fb_memcpy(&dst, fb->pitches, vmap, fb, clip);
 }
 
@@ -963,7 +963,7 @@ static int s3_load(struct s3_device *s3, const struct pci_device_id *id)
 		return ret;
 	drm_plane_helper_add(primary_plane, &s3_primary_plane_helper_funcs);
 
-	//drm_plane_enable_fb_damage_clips(primary_plane);
+	drm_plane_enable_fb_damage_clips(primary_plane);
 
 	/* CRTC */
 	crtc = &s3->crtc;
