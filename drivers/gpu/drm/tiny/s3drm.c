@@ -62,7 +62,7 @@
 /* ------------------------------------------------------------------------- */
 /* Device                                                                    */
 
-enum s3drm_chip {
+enum s3_chip {
 	CHIP_UNKNOWN		= 0x00,
 	CHIP_732_TRIO32		= 0x01,
 	CHIP_764_TRIO64		= 0x02,
@@ -121,26 +121,6 @@ static const struct svga_timing_regs s3_timing_regs     = {
 	s3_v_blank_end_regs, s3_v_sync_start_regs, s3_v_sync_end_regs,
 };
 
-static const struct svga_fb_format s3drm_formats[] = {
-	{ 0,  {0, 6, 0},  {0, 6, 0},  {0, 6, 0}, {0, 0, 0}, 0,
-		FB_TYPE_TEXT, FB_AUX_TEXT_SVGA_STEP4,	FB_VISUAL_PSEUDOCOLOR, 8, 16},
-	{ 4,  {0, 4, 0},  {0, 4, 0},  {0, 4, 0}, {0, 0, 0}, 0,
-		FB_TYPE_PACKED_PIXELS, 0,		FB_VISUAL_PSEUDOCOLOR, 8, 16},
-	{ 4,  {0, 4, 0},  {0, 4, 0},  {0, 4, 0}, {0, 0, 0}, 1,
-		FB_TYPE_INTERLEAVED_PLANES, 1,		FB_VISUAL_PSEUDOCOLOR, 8, 16},
-	{ 8,  {0, 8, 0},  {0, 8, 0},  {0, 8, 0}, {0, 0, 0}, 0,
-		FB_TYPE_PACKED_PIXELS, 0,		FB_VISUAL_PSEUDOCOLOR, 4, 8},
-	{16,  {10, 5, 0}, {5, 5, 0},  {0, 5, 0}, {0, 0, 0}, 0,
-		FB_TYPE_PACKED_PIXELS, 0,		FB_VISUAL_TRUECOLOR, 2, 4},
-	{16,  {11, 5, 0}, {5, 6, 0},  {0, 5, 0}, {0, 0, 0}, 0,
-		FB_TYPE_PACKED_PIXELS, 0,		FB_VISUAL_TRUECOLOR, 2, 4},
-	{24,  {16, 8, 0}, {8, 8, 0},  {0, 8, 0}, {0, 0, 0}, 0,
-		FB_TYPE_PACKED_PIXELS, 0,		FB_VISUAL_TRUECOLOR, 1, 2},
-	{32,  {16, 8, 0}, {8, 8, 0},  {0, 8, 0}, {0, 0, 0}, 0,
-		FB_TYPE_PACKED_PIXELS, 0,		FB_VISUAL_TRUECOLOR, 1, 2},
-	SVGA_FORMAT_END
-};
-
 static const struct svga_pll s3_pll = {3, 129, 3, 33, 0, 3, 35000, 240000, 14318};
 static const struct svga_pll s3_trio3d_pll = {3, 129, 3, 31, 0, 4, 230000, 460000, 14318};
 
@@ -157,7 +137,7 @@ static const char * const s3_names[] = {
 };
 
 struct s3_device {
-	enum s3drm_chip chip;
+	enum s3_chip chip;
 	int rev;
 	int mclk_freq;
 	int wc_cookie;
@@ -176,7 +156,6 @@ struct s3_device {
 	struct drm_encoder encoder;
 	struct drm_connector connector;
 	void __iomem *screen_base;
-	u32 screen_size;
 };
 
 /* ------------------------------------------------------------------------- */
@@ -391,32 +370,37 @@ static int s3_setup_ddc_bus(struct s3_device *s3)
 /* ------------------------------------------------------------------------- */
 /* DRM                                                                       */
 
-/* Blank screen and turn off sync */
-static void s3_disable_display(struct s3_device *s3)
+static int s3_set_par(struct drm_crtc *crtc, struct drm_display_mode *mode)
 {
-	svga_wseq_mask(s3->state.vgabase, 0x01, 0x20, 0x20);
-	svga_wcrt_mask(s3->state.vgabase, 0x17, 0x00, 0x80);
-}
+	struct s3_device *s3 = container_of(crtc, struct s3_device, crtc);
+	u32 offset_value, screen_size, dbytes;
+	u32 bpp = 32; // TODO
+	u32 htotal, hsstart, value, multiplex;
+	u32 hmul = 1;
 
-/* Re-enable screen and sync */
-static void s3_enable_display(struct s3_device *s3)
-{
-	svga_wcrt_mask(s3->state.vgabase, 0x17, 0x80, 0x80);
-	svga_wseq_mask(s3->state.vgabase, 0x01, 0x00, 0x20);
-}
+	if (bpp != 0) {
+		crtc->primary->state->fb->pitches[0] = mode->hdisplay * (bpp / 8);
+		drm_info(&(s3->dev), "pitch: %u\n", crtc->primary->state->fb->pitches[0]);
 
-/* Unlock registers */
-static void s3_unlock_regs(struct s3_device *s3)
-{
+		offset_value = (mode->hdisplay * bpp) / 64;
+		drm_info(&(s3->dev), "offset_value: %u\n", offset_value);
+
+		screen_size = mode->vdisplay * crtc->primary->state->fb->pitches[0];
+		drm_info(&(s3->dev), "screen_size: %u\n", screen_size);
+	} else {
+		offset_value = mode->hdisplay / 16;
+		screen_size = (mode->hdisplay * mode->vdisplay) / 64;
+	}
+
+	/* Unlock registers */
 	vga_wcrt(s3->state.vgabase, 0x38, 0x48);
 	vga_wcrt(s3->state.vgabase, 0x39, 0xA5);
 	vga_wseq(s3->state.vgabase, 0x08, 0x06);
 	svga_wcrt_mask(s3->state.vgabase, 0x11, 0x00, 0x80);
-}
 
-static int s3_set_format_regs(struct s3_device *s3, const struct drm_format_info *format)
-{
-	u32 multiplex = 0;
+	/* Blank screen and turn off sync */
+	svga_wseq_mask(s3->state.vgabase, 0x01, 0x20, 0x20);
+	svga_wcrt_mask(s3->state.vgabase, 0x17, 0x00, 0x80);
 
 	/* Set default values */
 	svga_set_default_gfx_regs(s3->state.vgabase);
@@ -433,6 +417,9 @@ static int s3_set_format_regs(struct s3_device *s3, const struct drm_format_info
 	svga_wcrt_mask(s3->state.vgabase, 0x43, 0x00, 0x01); /* no DDR */
 	svga_wcrt_mask(s3->state.vgabase, 0x5D, 0x00, 0x28); /* Clear strange HSlen bits */
 
+	/* Set the offset register */
+	svga_wcrt_multi(s3->state.vgabase, s3_offset_regs, offset_value);
+
 	if (s3->chip != CHIP_357_VIRGE_GX2 &&
 	    s3->chip != CHIP_359_VIRGE_GX2P &&
 	    s3->chip != CHIP_360_TRIO3D_1X &&
@@ -448,44 +435,25 @@ static int s3_set_format_regs(struct s3_device *s3, const struct drm_format_info
 	vga_wcrt(s3->state.vgabase, 0x3A, 0x35);
 	svga_wattr(s3->state.vgabase, 0x33, 0x00);
 
+	if (mode->flags & DRM_MODE_FLAG_DBLSCAN)
+		svga_wcrt_mask(s3->state.vgabase, 0x09, 0x80, 0x80);
+	else
+		svga_wcrt_mask(s3->state.vgabase, 0x09, 0x00, 0x80);
+
+	if (mode->flags & DRM_MODE_FLAG_INTERLACE)
+		svga_wcrt_mask(s3->state.vgabase, 0x42, 0x20, 0x20);
+	else
+		svga_wcrt_mask(s3->state.vgabase, 0x42, 0x00, 0x20);
+
 	/* Disable hardware graphics cursor */
 	svga_wcrt_mask(s3->state.vgabase, 0x45, 0x00, 0x01);
 	/* Disable Streams engine */
 	svga_wcrt_mask(s3->state.vgabase, 0x67, 0x00, 0x0C);
 
-	if (s3->chip == CHIP_357_VIRGE_GX2 || s3->chip == CHIP_359_VIRGE_GX2P ||
-	    s3->chip == CHIP_360_TRIO3D_1X || s3->chip == CHIP_362_TRIO3D_2X ||
-	    s3->chip == CHIP_368_TRIO3D_2X || s3->chip == CHIP_260_VIRGE_MX)
-		vga_wcrt(s3->state.vgabase, 0x34, 0x00);
-	else /* enable Data Transfer Position Control (DTPC) */
-		vga_wcrt(s3->state.vgabase, 0x34, 0x10);
-
-	svga_wcrt_mask(s3->state.vgabase, 0x31, 0x00, 0x40);
-
 	if (s3->chip == CHIP_375_VIRGE_DX) {
 		vga_wcrt(s3->state.vgabase, 0x86, 0x80);
 		vga_wcrt(s3->state.vgabase, 0x90, 0x00);
 	}
-
-	// TODO
-	/* Set mode-specific register values */
-	/* For now, force 32 bpp */
-	svga_wcrt_mask(s3->state.vgabase, 0x50, 0x30, 0x30);
-	svga_wcrt_mask(s3->state.vgabase, 0x67, 0xD0, 0xF0);
-
-	if (s3->chip != CHIP_988_VIRGE_VX) {
-		svga_wseq_mask(s3->state.vgabase, 0x15, multiplex ? 0x10 : 0x00, 0x10);
-		svga_wseq_mask(s3->state.vgabase, 0x18, multiplex ? 0x80 : 0x00, 0x80);
-	}
-
-	return 0;
-}
-
-static int s3_set_mode_regs(struct s3_device *s3, const struct drm_display_mode *mode)
-{
-	u32 dbytes;
-	u32 htotal, hsstart, value;
-	u32 hmul = 1;
 
 	if (s3->chip == CHIP_988_VIRGE_VX) {
 		vga_wcrt(s3->state.vgabase, 0x50, 0x00);
@@ -500,22 +468,33 @@ static int s3_set_mode_regs(struct s3_device *s3, const struct drm_display_mode 
 	    s3->chip == CHIP_368_TRIO3D_2X || s3->chip == CHIP_365_TRIO3D     ||
 	    s3->chip == CHIP_375_VIRGE_DX  || s3->chip == CHIP_385_VIRGE_GX   ||
 	    s3->chip == CHIP_260_VIRGE_MX) {
-		dbytes = mode->hdisplay * ((32 + 7) / 8); // TODO Replace 32 with bpp.
+		dbytes = mode->hdisplay * ((bpp + 7) / 8);
 		vga_wcrt(s3->state.vgabase, 0x91, (dbytes + 7) / 8);
 		vga_wcrt(s3->state.vgabase, 0x90, (((dbytes + 7) / 8) >> 8) | 0x80);
 		vga_wcrt(s3->state.vgabase, 0x66, 0x81);
 	}
 
-	if (mode->flags & DRM_MODE_FLAG_DBLSCAN)
-		svga_wcrt_mask(s3->state.vgabase, 0x09, 0x80, 0x80);
-	else
-		svga_wcrt_mask(s3->state.vgabase, 0x09, 0x00, 0x80);
+	if (s3->chip == CHIP_357_VIRGE_GX2 || s3->chip == CHIP_359_VIRGE_GX2P ||
+	    s3->chip == CHIP_360_TRIO3D_1X || s3->chip == CHIP_362_TRIO3D_2X ||
+	    s3->chip == CHIP_368_TRIO3D_2X || s3->chip == CHIP_260_VIRGE_MX)
+		vga_wcrt(s3->state.vgabase, 0x34, 0x00);
+	else /* enable Data Transfer Position Control (DTPC) */
+		vga_wcrt(s3->state.vgabase, 0x34, 0x10);
 
-	if (mode->flags & DRM_MODE_FLAG_INTERLACE)
-		svga_wcrt_mask(s3->state.vgabase, 0x42, 0x20, 0x20);
-	else
-		svga_wcrt_mask(s3->state.vgabase, 0x42, 0x00, 0x20);
+	svga_wcrt_mask(s3->state.vgabase, 0x31, 0x00, 0x40);
+	multiplex = 0;
+	hmul = 1;
 
+	// TODO
+	/* Set mode-specific register values */
+	/* For now, force 32 bpp */
+	svga_wcrt_mask(s3->state.vgabase, 0x50, 0x30, 0x30);
+	svga_wcrt_mask(s3->state.vgabase, 0x67, 0xD0, 0xF0);
+
+	if (s3->chip != CHIP_988_VIRGE_VX) {
+		svga_wseq_mask(s3->state.vgabase, 0x15, multiplex ? 0x10 : 0x00, 0x10);
+		svga_wseq_mask(s3->state.vgabase, 0x18, multiplex ? 0x80 : 0x00, 0x80);
+	}
 
 	s3_set_pixclock(s3, mode->crtc_clock);
 
@@ -581,6 +560,10 @@ static int s3_set_mode_regs(struct s3_device *s3, const struct drm_display_mode 
 			svga_wcrt_mask(s3->state.vgabase, 0x42, 0x00, 0x20);
 	}
 
+	/* Re-enable screen and sync */
+	svga_wcrt_mask(s3->state.vgabase, 0x17, 0x80, 0x80);
+	svga_wseq_mask(s3->state.vgabase, 0x01, 0x00, 0x20);
+
 	return 0;
 }
 
@@ -629,13 +612,13 @@ static int s3_fb_helper_probe(struct drm_fb_helper *fb_helper, struct drm_fb_hel
 	return 0;
 }
 
-static const struct drm_fb_helper_funcs s3drm_fb_helper_funcs = {
+static const struct drm_fb_helper_funcs s3_fb_helper_funcs = {
 	.fb_probe = s3_fb_helper_probe,
 };
 
-DEFINE_DRM_GEM_FOPS(s3drm_fops);
+DEFINE_DRM_GEM_FOPS(s3_fops);
 
-static const struct drm_driver s3drm_driver = {
+static const struct drm_driver s3_driver = {
 	DRM_GEM_SHMEM_DRIVER_OPS,
 	.name			= DRIVER_NAME,
 	.desc			= DRIVER_DESC,
@@ -645,12 +628,10 @@ static const struct drm_driver s3drm_driver = {
 	.patchlevel		= DRIVER_PATCHLEVEL,
 	.driver_features	= DRIVER_ATOMIC | DRIVER_GEM | DRIVER_MODESET,
 	.lastclose		= drm_fb_helper_lastclose,
-	.fops			= &s3drm_fops,
+	.fops			= &s3_fops,
 };
 
 static const uint32_t s3_formats[] = {
-	/* DRM_FORMAT_RGB565, */
-	/* DRM_FORMAT_RGB888, */
 	DRM_FORMAT_XRGB8888,
 };
 
@@ -659,8 +640,9 @@ static const uint64_t s3_primary_plane_format_modifiers[] = {
 	DRM_FORMAT_MOD_INVALID,
 };
 
+
 static int s3_primary_plane_helper_atomic_check(struct drm_plane *plane,
-						struct drm_atomic_state *state)
+						       struct drm_atomic_state *state)
 {
 	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state, plane);
 	struct drm_shadow_plane_state *new_shadow_plane_state =
@@ -668,7 +650,7 @@ static int s3_primary_plane_helper_atomic_check(struct drm_plane *plane,
 	struct drm_framebuffer *new_fb = new_plane_state->fb;
 	struct drm_crtc *new_crtc = new_plane_state->crtc;
 	struct drm_crtc_state *new_crtc_state = NULL;
-	// struct drm_display_mode *mode = &new_crtc->mode;
+
 	int ret;
 
 	if (new_crtc)
@@ -685,31 +667,13 @@ static int s3_primary_plane_helper_atomic_check(struct drm_plane *plane,
 
 	void *buf;
 
+	/* format conversion necessary; reserve buffer */
 	buf = drm_format_conv_state_reserve(&new_shadow_plane_state->fmtcnv_state,
 					    new_fb->pitches[0], GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
 
-	// TODO: Check mode for validity (VRAM, etc).
-
 	return 0;
-}
-
-static void s3_primary_plane_helper_atomic_enable(struct drm_plane *plane,
-						  struct drm_atomic_state *state)
-{
-	struct s3_device *s3 = s3_device_of_dev(plane->dev);
-	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state, plane);
-	struct drm_framebuffer *new_fb = new_plane_state->fb;
-	struct drm_crtc *new_crtc = new_plane_state->crtc;
-
-	u32 cpp = new_fb->format->depth;
-	new_fb->pitches[0] = new_crtc->mode.hdisplay * cpp;
-
-	s3_set_format_regs(s3, new_fb->format);
-
-	/* Set the offset register */
-	svga_wcrt_multi(s3->state.vgabase, s3_offset_regs, new_fb->pitches[0] / 64); // TODO: Move into s3_set_format_regs ???
 }
 
 static void s3_handle_damage(struct s3_device *s3, const struct iosys_map *vmap,
@@ -754,18 +718,22 @@ out_drm_gem_fb_end_cpu_access:
 static void s3_primary_plane_helper_atomic_disable(struct drm_plane *plane,
 						   struct drm_atomic_state *state)
 {
-	struct s3_device *s3 = s3_device_of_dev(plane->dev);
-	s3_disable_display(s3);
+	// TODO
 	return;
 }
 
+static void s3_crtc_atomic_enable(struct drm_crtc *crtc,
+				  struct drm_atomic_state *state)
+{
+	s3_set_par(crtc, &crtc->mode);
+	return;
+}
 
 static const struct drm_plane_helper_funcs s3_primary_plane_helper_funcs = {
 	DRM_GEM_SHADOW_PLANE_HELPER_FUNCS,
 	.atomic_check = s3_primary_plane_helper_atomic_check,
 	.atomic_update = s3_primary_plane_helper_atomic_update,
 	.atomic_disable = s3_primary_plane_helper_atomic_disable,
-	.atomic_enable = s3_primary_plane_helper_atomic_enable,
 };
 
 static const struct drm_plane_funcs s3_primary_plane_funcs = {
@@ -776,36 +744,10 @@ static const struct drm_plane_funcs s3_primary_plane_funcs = {
 };
 
 static enum drm_mode_status s3_crtc_helper_mode_valid(struct drm_crtc *crtc,
-						      const struct drm_display_mode *mode)
+							     const struct drm_display_mode *mode)
 {
-	if ((mode->hdisplay % 8) != 0 || (mode->hsync_start % 8) != 0 ||
-	    (mode->hsync_end % 8) != 0 || (mode->htotal % 8) != 0) {
-		return MODE_H_ILLEGAL;
-	}
-
+	// TODO ?
 	return MODE_OK;
-}
-
-static void s3_crtc_helper_atomic_enable(struct drm_crtc *crtc,
-				  struct drm_atomic_state *state)
-{
-	struct s3_device *s3 = s3_device_of_dev(crtc->dev);
-	struct drm_crtc_state *crtc_state = crtc->state;
-	struct drm_display_mode *adjusted_mode = &crtc_state->adjusted_mode;
-
-	s3_unlock_regs(s3);
-	s3_disable_display(s3);
-
-	s3_set_mode_regs(s3, adjusted_mode);
-
-	s3_enable_display(s3);
-}
-
-static void s3_crtc_helper_atomic_disable(struct drm_crtc *crtc,
-					  struct drm_atomic_state *state)
-{
-	struct s3_device *s3 = s3_device_of_dev(crtc->dev);
-	s3_disable_display(s3);
 }
 
 /*
@@ -816,8 +758,7 @@ static void s3_crtc_helper_atomic_disable(struct drm_crtc *crtc,
 static const struct drm_crtc_helper_funcs s3_crtc_helper_funcs = {
 	.mode_valid = s3_crtc_helper_mode_valid,
 	.atomic_check = drm_crtc_helper_atomic_check,
-	.atomic_enable = s3_crtc_helper_atomic_enable,
-	.atomic_disable = s3_crtc_helper_atomic_disable,
+	.atomic_enable = s3_crtc_atomic_enable,
 };
 
 static const struct drm_crtc_funcs s3_crtc_funcs = {
@@ -855,7 +796,7 @@ err_drm_connector_update_edid_property:
 	return 0;
 }
 
-static int s3_connector_helper_detect_from_ddc(struct drm_connector *connector,
+static int drm_connector_helper_detect_from_ddc(struct drm_connector *connector,
 					 struct drm_modeset_acquire_ctx *ctx,
 					 bool force)
 {
@@ -872,20 +813,14 @@ static int s3_connector_helper_detect_from_ddc(struct drm_connector *connector,
 
 static const struct drm_connector_helper_funcs s3_connector_helper_funcs = {
 	.get_modes = s3_connector_helper_get_modes,
-	.detect_ctx = s3_connector_helper_detect_from_ddc,
+	.detect_ctx = drm_connector_helper_detect_from_ddc,
 };
 
-static enum drm_mode_status s3_mode_valid(struct drm_device *device,
-					  const struct drm_display_mode *mode)
-{
-	return MODE_OK;
-}
 
 static const struct drm_mode_config_funcs s3_mode_config_funcs = {
 	.fb_create = drm_gem_fb_create_with_dirty,
 	.atomic_check = drm_atomic_helper_check,
 	.atomic_commit = drm_atomic_helper_commit,
-	.mode_valid = s3_mode_valid,
 };
 
 static const struct drm_connector_funcs s3_connector_funcs = {
@@ -945,62 +880,6 @@ static int s3_load(struct s3_device *s3, const struct pci_device_id *id)
 	s3->rev = vga_rcrt(s3->state.vgabase, 0x2f);
 	if (s3->chip & CHIP_UNDECIDED_FLAG)
 		s3->chip = s3_identification(s3);
-
-	/* Find how much physical memory there is on card */
-	regval = vga_rcrt(s3->state.vgabase, 0x36);
-	if (s3->chip == CHIP_360_TRIO3D_1X ||
-	    s3->chip == CHIP_362_TRIO3D_2X ||
-	    s3->chip == CHIP_368_TRIO3D_2X ||
-	    s3->chip == CHIP_365_TRIO3D) {
-		switch ((regval & 0xE0) >> 5) {
-		case 0: /* 8MB -- only 4MB usable for display */
-		case 1: /* 4MB with 32-bit bus */
-		case 2:	/* 4MB */
-			s3->screen_size = 4 << 20;
-			break;
-		case 4: /* 2MB on 365 Trio3D */
-		case 6: /* 2MB */
-			s3->screen_size = 2 << 20;
-			break;
-		}
-	} else if (s3->chip == CHIP_357_VIRGE_GX2 ||
-		   s3->chip == CHIP_359_VIRGE_GX2P ||
-		   s3->chip == CHIP_260_VIRGE_MX) {
-		switch ((regval & 0xC0) >> 6) {
-		case 1: /* 4MB */
-			s3->screen_size = 4 << 20;
-			break;
-		case 3: /* 2MB */
-			s3->screen_size = 2 << 20;
-			break;
-		}
-	} else if (s3->chip == CHIP_988_VIRGE_VX) {
-		switch ((regval & 0x60) >> 5) {
-		case 0: /* 2MB */
-			s3->screen_size = 2 << 20;
-			break;
-		case 1: /* 4MB */
-			s3->screen_size = 4 << 20;
-			break;
-		case 2: /* 6MB */
-			s3->screen_size = 6 << 20;
-			break;
-		case 3: /* 8MB */
-			s3->screen_size = 8 << 20;
-			break;
-		}
-		/* off-screen memory */
-		regval = vga_rcrt(s3->state.vgabase, 0x37);
-		switch ((regval & 0x60) >> 5) {
-		case 1: /* 4MB */
-			s3->screen_size -= 4 << 20;
-			break;
-		case 2: /* 2MB */
-			s3->screen_size -= 2 << 20;
-			break;
-		}
-	} else
-		s3->screen_size = s3_memsizes[regval >> 5] << 10;
 
 	/* Find MCLK frequency */
 	regval = vga_rseq(s3->state.vgabase, 0x10);
@@ -1095,7 +974,7 @@ static int s3_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	}
 
 	/* Allocate and fill driver data structure */
-	s3 = devm_drm_dev_alloc(&pdev->dev, &s3drm_driver, struct s3_device, dev);
+	s3 = devm_drm_dev_alloc(&pdev->dev, &s3_driver, struct s3_device, dev);
 	if (!s3)
 		return -ENOMEM;
 
@@ -1163,7 +1042,7 @@ static const struct pci_device_id s3_devices[] = {
 	{ /* End of list */ }
 };
 
-static struct pci_driver s3drm_pci_driver = {
+static struct pci_driver s3_pci_driver = {
 	.name		= DRIVER_NAME,
 	.id_table	= s3_devices,
 	.probe		= s3_pci_probe,
@@ -1173,7 +1052,7 @@ static struct pci_driver s3drm_pci_driver = {
 
 /* ------------------------------------------------------------------------- */
 
-drm_module_pci_driver(s3drm_pci_driver);
+drm_module_pci_driver(s3_pci_driver);
 
 MODULE_DEVICE_TABLE(pci, s3_devices);
 MODULE_AUTHOR(DRIVER_AUTHOR);
