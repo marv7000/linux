@@ -434,6 +434,12 @@ static void tick_nohz_kick_task(struct task_struct *tsk)
 	 *   smp_mb__after_spin_lock()
 	 *   tick_nohz_task_switch()
 	 *     LOAD p->tick_dep_mask
+	 *
+	 * XXX given a task picks up the dependency on schedule(), should we
+	 * only care about tasks that are currently on the CPU instead of all
+	 * that are on the runqueue?
+	 *
+	 * That is, does this want to be: task_on_cpu() / task_curr()?
 	 */
 	if (!sched_task_on_rq(tsk))
 		return;
@@ -1026,10 +1032,10 @@ static void tick_nohz_stop_tick(struct tick_sched *ts, int cpu)
 		if (expires == KTIME_MAX || ts->next_tick == hrtimer_get_expires(&ts->sched_timer))
 			return;
 
-		WARN_ON_ONCE(1);
-		printk_once("basemono: %llu ts->next_tick: %llu dev->next_event: %llu timer->active: %d timer->expires: %llu\n",
-			    basemono, ts->next_tick, dev->next_event,
-			    hrtimer_active(&ts->sched_timer), hrtimer_get_expires(&ts->sched_timer));
+		WARN_ONCE(1, "basemono: %llu ts->next_tick: %llu dev->next_event: %llu "
+			  "timer->active: %d timer->expires: %llu\n", basemono, ts->next_tick,
+			  dev->next_event, hrtimer_active(&ts->sched_timer),
+			  hrtimer_get_expires(&ts->sched_timer));
 	}
 
 	/*
@@ -1381,20 +1387,6 @@ ktime_t tick_nohz_get_sleep_length(ktime_t *delta_next)
 unsigned long tick_nohz_get_idle_calls_cpu(int cpu)
 {
 	struct tick_sched *ts = tick_get_tick_sched(cpu);
-
-	return ts->idle_calls;
-}
-
-/**
- * tick_nohz_get_idle_calls - return the current idle calls counter value
- *
- * Called from the schedutil frequency scaling governor in scheduler context.
- *
- * Return: the current idle calls counter value for the current CPU
- */
-unsigned long tick_nohz_get_idle_calls(void)
-{
-	struct tick_sched *ts = this_cpu_ptr(&tick_cpu_sched);
 
 	return ts->idle_calls;
 }

@@ -3208,6 +3208,9 @@ lpfc_bsg_diag_loopback_run(struct bsg_job *job)
 	cmdiocbq->num_bdes = num_bde;
 	cmdiocbq->cmd_flag |= LPFC_IO_LIBDFC;
 	cmdiocbq->cmd_flag |= LPFC_IO_LOOPBACK;
+	if (phba->cfg_vmid_app_header)
+		cmdiocbq->cmd_flag |= LPFC_IO_VMID;
+
 	cmdiocbq->vport = phba->pport;
 	cmdiocbq->cmd_cmpl = NULL;
 	cmdiocbq->bpl_dmabuf = txbmp;
@@ -5002,7 +5005,8 @@ lpfc_forced_link_speed(struct bsg_job *job)
 		goto job_error;
 	}
 
-	forced_reply->supported = (phba->hba_flag & HBA_FORCED_LINK_SPEED)
+	forced_reply->supported = test_bit(HBA_FORCED_LINK_SPEED,
+					   &phba->hba_flag)
 				   ? LPFC_FORCED_LINK_SPEED_SUPPORTED
 				   : LPFC_FORCED_LINK_SPEED_NOT_SUPPORTED;
 job_error:
@@ -5409,7 +5413,7 @@ lpfc_get_cgnbuf_info(struct bsg_job *job)
 	struct get_cgnbuf_info_req *cgnbuf_req;
 	struct lpfc_cgn_info *cp;
 	uint8_t *cgn_buff;
-	int size, cinfosz;
+	size_t size, cinfosz;
 	int  rc = 0;
 
 	if (job->request_len < sizeof(struct fc_bsg_request) +

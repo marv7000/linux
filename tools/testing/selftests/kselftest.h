@@ -16,10 +16,12 @@
  * For each test, report any progress, debugging, etc with:
  *
  *     ksft_print_msg(fmt, ...);
+ *     ksft_perror(msg);
  *
  * and finally report the pass/fail/skip/xfail state of the test with one of:
  *
  *     ksft_test_result(condition, fmt, ...);
+ *     ksft_test_result_report(result, fmt, ...);
  *     ksft_test_result_pass(fmt, ...);
  *     ksft_test_result_fail(fmt, ...);
  *     ksft_test_result_skip(fmt, ...);
@@ -39,6 +41,7 @@
  * the program is aborting before finishing all tests):
  *
  *    ksft_exit_fail_msg(fmt, ...);
+ *    ksft_exit_fail_perror(msg);
  *
  */
 #ifndef __KSELFTEST_H
@@ -58,6 +61,7 @@
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 #endif
 
+#if defined(__i386__) || defined(__x86_64__) /* arch */
 /*
  * gcc cpuid.h provides __cpuid_count() since v4.4.
  * Clang/LLVM cpuid.h provides  __cpuid_count() since v3.4.0.
@@ -72,6 +76,7 @@
 			      : "=a" (a), "=b" (b), "=c" (c), "=d" (d)	\
 			      : "0" (level), "2" (count))
 #endif
+#endif /* end arch */
 
 /* define kselftest exit codes */
 #define KSFT_PASS  0
@@ -165,15 +170,7 @@ static inline __printf(1, 2) void ksft_print_msg(const char *msg, ...)
 
 static inline void ksft_perror(const char *msg)
 {
-#ifndef NOLIBC
 	ksft_print_msg("%s: %s (%d)\n", msg, strerror(errno), errno);
-#else
-	/*
-	 * nolibc doesn't provide strerror() and it seems
-	 * inappropriate to add one, just print the errno.
-	 */
-	ksft_print_msg("%s: %d)\n", msg, errno);
-#endif
 }
 
 static inline __printf(1, 2) void ksft_test_result_pass(const char *msg, ...)
@@ -305,13 +302,34 @@ void ksft_test_result_code(int exit_code, const char *test_name,
 	printf("\n");
 }
 
-static inline __noreturn int ksft_exit_pass(void)
+/**
+ * ksft_test_result() - Report test success based on truth of condition
+ *
+ * @condition: if true, report test success, otherwise failure.
+ */
+#define ksft_test_result_report(result, fmt, ...) do {		\
+	switch (result) {					\
+	case KSFT_PASS:						\
+		ksft_test_result_pass(fmt, ##__VA_ARGS__);	\
+		break;						\
+	case KSFT_FAIL:						\
+		ksft_test_result_fail(fmt, ##__VA_ARGS__);	\
+		break;						\
+	case KSFT_XFAIL:					\
+		ksft_test_result_xfail(fmt, ##__VA_ARGS__);	\
+		break;						\
+	case KSFT_SKIP:						\
+		ksft_test_result_skip(fmt, ##__VA_ARGS__);	\
+		break;						\
+	} } while (0)
+
+static inline __noreturn void ksft_exit_pass(void)
 {
 	ksft_print_cnts();
 	exit(KSFT_PASS);
 }
 
-static inline __noreturn int ksft_exit_fail(void)
+static inline __noreturn void ksft_exit_fail(void)
 {
 	ksft_print_cnts();
 	exit(KSFT_FAIL);
@@ -338,7 +356,7 @@ static inline __noreturn int ksft_exit_fail(void)
 		  ksft_cnt.ksft_xfail +	\
 		  ksft_cnt.ksft_xskip)
 
-static inline __noreturn __printf(1, 2) int ksft_exit_fail_msg(const char *msg, ...)
+static inline __noreturn __printf(1, 2) void ksft_exit_fail_msg(const char *msg, ...)
 {
 	int saved_errno = errno;
 	va_list args;
@@ -353,19 +371,24 @@ static inline __noreturn __printf(1, 2) int ksft_exit_fail_msg(const char *msg, 
 	exit(KSFT_FAIL);
 }
 
-static inline __noreturn int ksft_exit_xfail(void)
+static inline __noreturn void ksft_exit_fail_perror(const char *msg)
+{
+	ksft_exit_fail_msg("%s: %s (%d)\n", msg, strerror(errno), errno);
+}
+
+static inline __noreturn void ksft_exit_xfail(void)
 {
 	ksft_print_cnts();
 	exit(KSFT_XFAIL);
 }
 
-static inline __noreturn int ksft_exit_xpass(void)
+static inline __noreturn void ksft_exit_xpass(void)
 {
 	ksft_print_cnts();
 	exit(KSFT_XPASS);
 }
 
-static inline __noreturn __printf(1, 2) int ksft_exit_skip(const char *msg, ...)
+static inline __noreturn __printf(1, 2) void ksft_exit_skip(const char *msg, ...)
 {
 	int saved_errno = errno;
 	va_list args;
